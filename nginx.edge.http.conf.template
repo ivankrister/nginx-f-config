@@ -28,6 +28,7 @@ server {
     proxy_set_header sec-ch-ua-platform '"macOS"';
 
     location ~ /.+/.*\.(m3u8)$ {
+        resolver 8.8.8.8 1.1.1.1;
         proxy_set_header Host ${PRIME_STREAM_HOST};
         proxy_set_header Origin "${PRIME_STREAM_ORIGIN}";
         proxy_set_header Referer "${PRIME_STREAM_REFERER}";
@@ -35,7 +36,7 @@ server {
         proxy_set_header sec-ch-ua '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"';
         proxy_set_header sec-ch-ua-mobile "?0";
         proxy_set_header sec-ch-ua-platform '"macOS"';
-        proxy_pass http://${ORYX_SERVER}$request_uri;
+        proxy_pass https://${ORYX_SERVER}$request_uri;
 
         proxy_hide_header Access-Control-Allow-Origin;
         add_header Access-Control-Allow-Origin "*";
@@ -47,6 +48,7 @@ server {
     }
 
     location ~ /.+/.*\.(ts)$ {
+        resolver 8.8.8.8 1.1.1.1;
         proxy_set_header Host ${PRIME_STREAM_HOST};
         proxy_set_header Origin "${PRIME_STREAM_ORIGIN}";
         proxy_set_header Referer "${PRIME_STREAM_REFERER}";
@@ -54,8 +56,8 @@ server {
         proxy_set_header sec-ch-ua '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"';
         proxy_set_header sec-ch-ua-mobile "?0";
         proxy_set_header sec-ch-ua-platform '"macOS"';
-        proxy_pass http://${ORYX_SERVER}$request_uri;
-         proxy_hide_header Access-Control-Allow-Origin;
+        proxy_pass https://${ORYX_SERVER}$request_uri;
+        proxy_hide_header Access-Control-Allow-Origin;
         add_header Access-Control-Allow-Origin "*";
 
 
