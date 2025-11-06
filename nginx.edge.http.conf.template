@@ -37,6 +37,9 @@ server {
         proxy_set_header sec-ch-ua-platform '"macOS"';
         proxy_pass http://${ORYX_SERVER}$request_uri;
 
+        proxy_hide_header Access-Control-Allow-Origin;
+        add_header Access-Control-Allow-Origin "*";
+
         proxy_cache srs_cache;
         proxy_cache_key $scheme$proxy_host$uri;
         proxy_cache_valid  200 302 ${SRS_M3U8_EXPIRE}s;
@@ -52,6 +55,9 @@ server {
         proxy_set_header sec-ch-ua-mobile "?0";
         proxy_set_header sec-ch-ua-platform '"macOS"';
         proxy_pass http://${ORYX_SERVER}$request_uri;
+         proxy_hide_header Access-Control-Allow-Origin;
+        add_header Access-Control-Allow-Origin "*";
+
 
         proxy_cache srs_cache;
         proxy_cache_key $scheme$proxy_host$uri;
