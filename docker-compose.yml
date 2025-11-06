@@ -4,7 +4,7 @@ services:
     build: .
     container_name: nginx-live
     ports:
-      - "8080:8080"
+      - "80:80"
     environment:
       - ORYX_SERVER=${ORYX_SERVER}
       - SRS_M3U8_EXPIRE=${SRS_M3U8_EXPIRE}
