@@ -1,34 +1,39 @@
 
-proxy_cache_path  /data/nginx-cache levels=1:2 keys_zone=srs_cache:8m max_size=1000m inactive=600m;
+proxy_cache_path /data/nginx-cache levels=1:2 keys_zone=srs_cache:64m max_size=2000m inactive=30s use_temp_path=off;
 proxy_temp_path /data/nginx-cache/tmp;
 
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
 
-    # ---------------------------------
-    # General Proxy and Timeout Settings
-    # ---------------------------------
-    resolver 8.8.8.8 1.1.1.1 valid=1200s ipv6=off;
+    # -------------------------------
+    # Connection + Timeout Settings
+    # -------------------------------
+    resolver 8.8.8.8 1.1.1.1 valid=300s ipv6=off;
 
-    proxy_connect_timeout 30s;
-    proxy_send_timeout 60s;
-    proxy_read_timeout 90s;
-    send_timeout 60s;
+    # Short but safe timeouts for small, fast segments
+    proxy_connect_timeout 5s;
+    proxy_send_timeout 10s;
+    proxy_read_timeout 10s;
+    send_timeout 10s;
 
-    # Cache lock controls — prevent long global locks
+    # Cache lock - prevent massive waits
     proxy_cache_lock on;
-    proxy_cache_lock_age 60s;
-    proxy_cache_lock_timeout 30s;
+    proxy_cache_lock_timeout 3s;
+    proxy_cache_lock_age 5s;
     proxy_cache_min_uses 1;
 
-    # Default cache for 404s (optional)
-    proxy_cache_valid 404 10s;
+    # Small default cache validity
+    proxy_cache_valid 404 3s;
+
+    # Keep connections open to upstreams
+    keepalive_timeout 30s;
+    keepalive_requests 1000;
 
     # ===============================
     # HLS Playlist (.m3u8)
     # ===============================
-    location ~ /.+/.*\.(m3u8)$ {
+    location ~ \.m3u8$ {
         proxy_set_header Host ${PRIME_STREAM_HOST};
         proxy_set_header Origin "${PRIME_STREAM_ORIGIN}";
         proxy_set_header Referer "${PRIME_STREAM_REFERER}";
@@ -39,28 +44,27 @@ server {
 
         proxy_pass https://${ORYX_SERVER}$request_uri;
 
-        # Cache + CORS
-        proxy_hide_header Cache-Control;
-        proxy_hide_header Access-Control-Allow-Origin;
-        add_header Cache-Control "public, max-age=3" always;
-        add_header Access-Control-Allow-Origin "*" always;
-
-        # Proxy Cache Controls
+        # Playlist changes every second or two
+        add_header Cache-Control "public, max-age=1" always;
         proxy_cache srs_cache;
         proxy_cache_key $scheme$proxy_host$uri;
-        proxy_cache_valid 200 302 ${SRS_M3U8_EXPIRE}s;
+        proxy_cache_valid 200 302 2s;
         add_header X-Cache-Status $upstream_cache_status;
 
-        # Buffering for smoother streaming
+        proxy_hide_header Cache-Control;
+        proxy_hide_header Access-Control-Allow-Origin;
+        add_header Access-Control-Allow-Origin "*" always;
+
+        # Buffering
         proxy_buffering on;
-        proxy_buffers 8 512k;
-        proxy_busy_buffers_size 512k;
+        proxy_buffers 4 128k;
+        proxy_busy_buffers_size 128k;
     }
 
     # ===============================
     # HLS Segments (.ts)
     # ===============================
-    location ~ /.+/.*\.(ts)$ {
+    location ~ \.ts$ {
         proxy_set_header Host ${PRIME_STREAM_HOST};
         proxy_set_header Origin "${PRIME_STREAM_ORIGIN}";
         proxy_set_header Referer "${PRIME_STREAM_REFERER}";
@@ -71,21 +75,23 @@ server {
 
         proxy_pass https://${ORYX_SERVER}$request_uri;
 
-        # Cache + CORS
+        # Each segment is ~170 KB, so we can cache briefly
+        add_header Cache-Control "public, max-age=5" always;
         proxy_hide_header Cache-Control;
-        add_header Cache-Control "public, max-age=6" always;
         proxy_hide_header Access-Control-Allow-Origin;
         add_header Access-Control-Allow-Origin "*" always;
 
-        # Proxy Cache Controls
         proxy_cache srs_cache;
         proxy_cache_key $scheme$proxy_host$uri;
-        proxy_cache_valid 200 302 ${SRS_TS_EXPIRE}s;
+        proxy_cache_valid 200 302 5s;
         add_header X-Cache-Status $upstream_cache_status;
 
-        # Buffering
+        # Enable efficient small object delivery
         proxy_buffering on;
-        proxy_buffers 8 512k;
-        proxy_busy_buffers_size 512k;
+        proxy_buffers 4 256k;
+        proxy_busy_buffers_size 256k;
+        sendfile on;
+        tcp_nopush on;
+        tcp_nodelay on;
     }
 }
