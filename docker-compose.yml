@@ -7,6 +7,7 @@ services:
       - "8080:80"
     environment:
       - ORYX_SERVER=${ORYX_SERVER}
+      - ORYX_SERVER2=${ORYX_SERVER2}
       - SRS_M3U8_EXPIRE=${SRS_M3U8_EXPIRE}
       - SRS_TS_EXPIRE=${SRS_TS_EXPIRE}
       - PRIME_STREAM_HOST=${PRIME_STREAM_HOST}

@@ -1,5 +1,8 @@
 FROM nginx:1.27-alpine
 
+ENV ORYX_SERVER="" \
+    ORYX_SERVER2=""
+
 # Provide our template for envsubst processing into conf.d/default.conf
 COPY nginx.edge.http.conf.template /etc/nginx/templates/default.conf.template
 
