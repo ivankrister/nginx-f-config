@@ -6,15 +6,29 @@ server {
     listen 80 default_server;
     listen [::]:80 default_server;
 
-    proxy_cache_valid  404 10s;
+    # ---------------------------------
+    # General Proxy and Timeout Settings
+    # ---------------------------------
+    resolver 8.8.8.8 1.1.1.1 valid=1200s ipv6=off;
+
+    proxy_connect_timeout 30s;
+    proxy_send_timeout 60s;
+    proxy_read_timeout 90s;
+    send_timeout 60s;
+
+    # Cache lock controls — prevent long global locks
     proxy_cache_lock on;
-    proxy_cache_lock_age 300s;
-    proxy_cache_lock_timeout 300s;
+    proxy_cache_lock_age 60s;
+    proxy_cache_lock_timeout 30s;
     proxy_cache_min_uses 1;
-  
 
+    # Default cache for 404s (optional)
+    proxy_cache_valid 404 10s;
+
+    # ===============================
+    # HLS Playlist (.m3u8)
+    # ===============================
     location ~ /.+/.*\.(m3u8)$ {
-        resolver 8.8.8.8 1.1.1.1;
         proxy_set_header Host ${PRIME_STREAM_HOST};
         proxy_set_header Origin "${PRIME_STREAM_ORIGIN}";
         proxy_set_header Referer "${PRIME_STREAM_REFERER}";
@@ -22,20 +36,31 @@ server {
         proxy_set_header sec-ch-ua '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"';
         proxy_set_header sec-ch-ua-mobile "?0";
         proxy_set_header sec-ch-ua-platform '"macOS"';
+
         proxy_pass https://${ORYX_SERVER}$request_uri;
 
+        # Cache + CORS
         proxy_hide_header Cache-Control;
         proxy_hide_header Access-Control-Allow-Origin;
-        add_header Access-Control-Allow-Origin "*";
+        add_header Cache-Control "public, max-age=3" always;
+        add_header Access-Control-Allow-Origin "*" always;
 
+        # Proxy Cache Controls
         proxy_cache srs_cache;
         proxy_cache_key $scheme$proxy_host$uri;
-        proxy_cache_valid  200 302 ${SRS_M3U8_EXPIRE}s;
+        proxy_cache_valid 200 302 ${SRS_M3U8_EXPIRE}s;
         add_header X-Cache-Status $upstream_cache_status;
+
+        # Buffering for smoother streaming
+        proxy_buffering on;
+        proxy_buffers 8 512k;
+        proxy_busy_buffers_size 512k;
     }
 
+    # ===============================
+    # HLS Segments (.ts)
+    # ===============================
     location ~ /.+/.*\.(ts)$ {
-        resolver 8.8.8.8 1.1.1.1;
         proxy_set_header Host ${PRIME_STREAM_HOST};
         proxy_set_header Origin "${PRIME_STREAM_ORIGIN}";
         proxy_set_header Referer "${PRIME_STREAM_REFERER}";
@@ -43,15 +68,23 @@ server {
         proxy_set_header sec-ch-ua '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"';
         proxy_set_header sec-ch-ua-mobile "?0";
         proxy_set_header sec-ch-ua-platform '"macOS"';
+
         proxy_pass https://${ORYX_SERVER}$request_uri;
+
+        # Cache + CORS
         proxy_hide_header Cache-Control;
+        add_header Cache-Control "public, max-age=6" always;
         proxy_hide_header Access-Control-Allow-Origin;
-        add_header Access-Control-Allow-Origin "*";
+        add_header Access-Control-Allow-Origin "*" always;
 
-
+        # Proxy Cache Controls
         proxy_cache srs_cache;
         proxy_cache_key $scheme$proxy_host$uri;
-        proxy_cache_valid  200 302 ${SRS_TS_EXPIRE}s;
+        proxy_cache_valid 200 302 ${SRS_TS_EXPIRE}s;
         add_header X-Cache-Status $upstream_cache_status;
-    }
+
+        # Buffering
+        proxy_buffering on;
+        proxy_buffers 8 512k;
+        proxy_busy_buffers_size 512k;
 }
