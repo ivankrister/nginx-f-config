@@ -1,5 +1,5 @@
 
-proxy_cache_path /data/nginx-cache levels=1:2 keys_zone=srs_cache:64m max_size=2000m inactive=30s use_temp_path=off;
+proxy_cache_path /data/nginx-cache levels=1:2 keys_zone=srs_cache:256m max_size=8000m inactive=60s use_temp_path=off;
 proxy_temp_path /data/nginx-cache/tmp;
 
 upstream oryx_origin {
@@ -14,7 +14,6 @@ server {
 
     resolver 1.1.1.1 8.8.8.8 9.9.9.9 valid=86400s ipv6=off;
 
-    # Upstream connection handling
     proxy_http_version 1.1;
     proxy_set_header Connection "";
 
@@ -25,14 +24,14 @@ server {
     keepalive_timeout 30s;
     keepalive_requests 1000;
 
-    # Cache lock (avoid origin stampede)
+    # --- Cache Lock Controls ---
     proxy_cache_lock on;
-    proxy_cache_lock_timeout 1s;
+    proxy_cache_lock_timeout 0.5s;
     proxy_cache_lock_age 2s;
     proxy_cache_min_uses 1;
+    proxy_cache_background_update on;
+    proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504;
 
-    # Small default cache validity
-    proxy_cache_valid 404 3s;
 
     # ===============================
     # HLS Playlist (.m3u8)
@@ -52,7 +51,7 @@ server {
         proxy_cache srs_cache;
         proxy_cache_key $scheme$proxy_host$uri;
         proxy_cache_valid 200 302 2s;
-        proxy_cache_use_stale error timeout updating;
+        proxy_cache_use_stale updating error timeout;
         
         add_header X-Cache-Status $upstream_cache_status;
 
@@ -91,7 +90,8 @@ server {
         proxy_cache srs_cache;
         proxy_cache_key $scheme$proxy_host$uri;
         proxy_cache_valid 200 302 5s;
-        proxy_cache_use_stale error timeout updating;
+        proxy_cache_background_update on;
+        proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504;
         add_header X-Cache-Status $upstream_cache_status;
         add_header Cache-Control "public, max-age=30, immutable" always;
 
