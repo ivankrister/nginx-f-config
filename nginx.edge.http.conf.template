@@ -3,6 +3,7 @@
 # ==============================================
 proxy_cache_path /data/nginx-cache levels=1:2 keys_zone=srs_cache:256m max_size=8000m inactive=60s use_temp_path=off;
 lua_shared_dict prefetch_lock 10m;
+lua_shared_dict prefetch_state 10m;
 
 # ==============================================
 # UPSTREAM POOL (multiple origins)
@@ -53,13 +54,13 @@ server {
         proxy_set_header sec-ch-ua-platform '"macOS"';
 
         body_filter_by_lua_file /etc/nginx/lua/prefetch_m3u8.lua;
-        proxy_pass https://oryx_origin$request_uri;
+        proxy_pass https://oryx_origin${DOLLAR}request_uri;
 
         proxy_cache srs_cache;
-        proxy_cache_key "$scheme$proxy_host$uri";
+        proxy_cache_key "${DOLLAR}scheme${DOLLAR}proxy_host${DOLLAR}uri";
         proxy_cache_valid 200 302 2s;
         proxy_cache_use_stale updating error timeout;
-        add_header X-Cache-Status "$upstream_cache_status";
+        add_header X-Cache-Status "${DOLLAR}upstream_cache_status" always;
 
         proxy_hide_header Cache-Control;
         proxy_hide_header Access-Control-Allow-Origin;
@@ -83,14 +84,28 @@ server {
         proxy_set_header sec-ch-ua-mobile "?0";
         proxy_set_header sec-ch-ua-platform '"macOS"';
 
-        proxy_pass https://oryx_origin$request_uri;
+        proxy_pass https://oryx_origin${DOLLAR}request_uri;
+
+        header_filter_by_lua_block {
+            local state = ngx.shared.prefetch_state
+            local uri = ngx.var.uri
+            local flag = "0"
+            if state and uri then
+                local was_prefetched = state:get(uri)
+                if was_prefetched then
+                    flag = "1"
+                    state:delete(uri)
+                end
+            end
+            ngx.header["X-Prefetch"] = flag
+        }
 
         proxy_cache srs_cache;
-        proxy_cache_key "$scheme$proxy_host$uri";
+        proxy_cache_key "${DOLLAR}scheme${DOLLAR}proxy_host${DOLLAR}uri";
         proxy_cache_valid 200 302 30s;
         proxy_cache_background_update off;
         proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504;
-        add_header X-Cache-Status "$upstream_cache_status";
+        add_header X-Cache-Status "${DOLLAR}upstream_cache_status" always;
         add_header Cache-Control "public, max-age=30, immutable" always;
 
         proxy_hide_header Cache-Control;
@@ -120,12 +135,14 @@ server {
         proxy_set_header sec-ch-ua-mobile "?0";
         proxy_set_header sec-ch-ua-platform '"macOS"';
 
-        proxy_pass https://oryx_origin$prefetch_uri;
+        proxy_pass https://oryx_origin${DOLLAR}prefetch_uri;
 
         proxy_cache srs_cache;
-        proxy_cache_key "$scheme$proxy_host$uri";
+        proxy_cache_key "${DOLLAR}scheme${DOLLAR}proxy_host${DOLLAR}uri";
         proxy_cache_valid 200 302 30s;
         proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504;
+        add_header X-Cache-Status "${DOLLAR}upstream_cache_status" always;
+        add_header X-Prefetch "1" always;
     }
 
     error_log /dev/stderr warn;

@@ -3,6 +3,7 @@ local ngx_log = ngx.log
 local ERR = ngx.ERR
 local DEBUG = ngx.DEBUG
 local shared_lock = ngx.shared.prefetch_lock
+local shared_state = ngx.shared.prefetch_state
 local HTTP_GET = ngx.HTTP_GET
 
 local function prefetch_worker(premature, uri)
@@ -28,15 +29,26 @@ local function prefetch_worker(premature, uri)
     if res.status >= 500 then
         ngx_log(ERR, "prefetch upstream error ", res.status, " for ", uri)
         shared_lock:delete(uri)
-    else
-        ngx_log(DEBUG, "prefetched ", uri, " with status ", res.status)
+        return
     end
+
+    if shared_state then
+        local ok_state, state_err = shared_state:set(uri, true, 30)
+        if not ok_state then
+            ngx_log(ERR, "prefetch state set failed for ", uri, ": ", state_err or "unknown")
+        end
+    end
+
+    shared_lock:delete(uri)
+    ngx_log(DEBUG, "prefetched ", uri, " with status ", res.status)
 end
 
 local function normalize_uri(segment)
     if not segment or segment == "" then
         return nil
     end
+
+    segment = segment:gsub("%s+$", "")
 
     if segment:match("^https?://") then
         -- Cross-origin URLs are not prefetched.
@@ -63,7 +75,7 @@ local function schedule_prefetch(body)
                 else
                     scheduled = scheduled + 1
                     if scheduled >= 5 then
-                        return
+                        return scheduled
                     end
                 end
             end
