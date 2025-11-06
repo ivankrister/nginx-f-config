@@ -22,6 +22,8 @@ server {
     proxy_cache_lock_timeout 3s;
     proxy_cache_lock_age 5s;
     proxy_cache_min_uses 1;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
 
     # Small default cache validity
     proxy_cache_valid 404 3s;
@@ -49,6 +51,8 @@ server {
         proxy_cache srs_cache;
         proxy_cache_key $scheme$proxy_host$uri;
         proxy_cache_valid 200 302 2s;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
         add_header X-Cache-Status $upstream_cache_status;
 
         proxy_hide_header Cache-Control;
@@ -59,6 +63,7 @@ server {
         proxy_buffering on;
         proxy_buffers 4 128k;
         proxy_busy_buffers_size 128k;
+        
     }
 
     # ===============================
