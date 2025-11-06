@@ -1,0 +1,24 @@
+# Environment variables
+.env
+
+# Logs
+logs/
+*.log
+
+# Cache
+cache/
+tmp/
+
+# Docker
+.dockerignore
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.temp

@@ -1,0 +1,15 @@
+
+services:
+  edge-proxy:
+    build: .
+    container_name: nginx-live
+    ports:
+      - "8080:8080"
+    environment:
+      - ORYX_SERVER=${ORYX_SERVER}
+      - SRS_M3U8_EXPIRE=${SRS_M3U8_EXPIRE}
+      - SRS_TS_EXPIRE=${SRS_TS_EXPIRE}
+      - PRIME_STREAM_HOST=${PRIME_STREAM_HOST}
+      - PRIME_STREAM_ORIGIN=${PRIME_STREAM_ORIGIN}
+      - PRIME_STREAM_REFERER=${PRIME_STREAM_REFERER}
+    restart: unless-stopped

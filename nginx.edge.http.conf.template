@@ -1,0 +1,61 @@
+
+proxy_cache_path  /data/nginx-cache levels=1:2 keys_zone=srs_cache:8m max_size=1000m inactive=600m;
+proxy_temp_path /data/nginx-cache/tmp;
+
+server {
+    listen 8080 default_server;
+    listen [::]:8080 default_server;
+
+    proxy_cache_valid  404 10s;
+    proxy_cache_lock on;
+    proxy_cache_lock_age 300s;
+    proxy_cache_lock_timeout 300s;
+    proxy_cache_min_uses 1;
+    proxy_set_header Accept "*/*";
+    proxy_set_header Accept-Language "en-US,en;q=0.9";
+    proxy_set_header Cache-Control "no-cache";
+    proxy_set_header Connection "keep-alive";
+    proxy_set_header Host ${PRIME_STREAM_HOST};
+    proxy_set_header Origin "${PRIME_STREAM_ORIGIN}";
+    proxy_set_header Pragma "no-cache";
+    proxy_set_header Referer "${PRIME_STREAM_REFERER}";
+    proxy_set_header Sec-Fetch-Dest "empty";
+    proxy_set_header Sec-Fetch-Mode "cors";
+    proxy_set_header Sec-Fetch-Site "cross-site";
+    proxy_set_header User-Agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
+    proxy_set_header sec-ch-ua '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"';
+    proxy_set_header sec-ch-ua-mobile "?0";
+    proxy_set_header sec-ch-ua-platform '"macOS"';
+
+    location ~ /.+/.*\.(m3u8)$ {
+        proxy_set_header Host ${PRIME_STREAM_HOST};
+        proxy_set_header Origin "${PRIME_STREAM_ORIGIN}";
+        proxy_set_header Referer "${PRIME_STREAM_REFERER}";
+        proxy_set_header User-Agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
+        proxy_set_header sec-ch-ua '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"';
+        proxy_set_header sec-ch-ua-mobile "?0";
+        proxy_set_header sec-ch-ua-platform '"macOS"';
+        proxy_pass http://${ORYX_SERVER}$request_uri;
+
+        proxy_cache srs_cache;
+        proxy_cache_key $scheme$proxy_host$uri;
+        proxy_cache_valid  200 302 ${SRS_M3U8_EXPIRE}s;
+        add_header X-Cache-Status $upstream_cache_status;
+    }
+
+    location ~ /.+/.*\.(ts)$ {
+        proxy_set_header Host ${PRIME_STREAM_HOST};
+        proxy_set_header Origin "${PRIME_STREAM_ORIGIN}";
+        proxy_set_header Referer "${PRIME_STREAM_REFERER}";
+        proxy_set_header User-Agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
+        proxy_set_header sec-ch-ua '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"';
+        proxy_set_header sec-ch-ua-mobile "?0";
+        proxy_set_header sec-ch-ua-platform '"macOS"';
+        proxy_pass http://${ORYX_SERVER}$request_uri;
+
+        proxy_cache srs_cache;
+        proxy_cache_key $scheme$proxy_host$uri;
+        proxy_cache_valid  200 302 ${SRS_TS_EXPIRE}s;
+        add_header X-Cache-Status $upstream_cache_status;
+    }
+}
