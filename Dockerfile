@@ -2,7 +2,8 @@ ARG ARCH=
 FROM ${ARCH}openresty/openresty:1.25.3.2-alpine AS dist
 
 ENV ORYX_SERVER="" \
-    ORYX_SERVER2=""
+    ORYX_SERVER2="" \
+    PERYA_SERVER=""
 
 # Required for envsubst in the entrypoint
 RUN apk add --no-cache gettext
