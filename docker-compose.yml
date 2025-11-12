@@ -1,17 +1,33 @@
 
 services:
-  edge-proxy:
-    build: .
-    container_name: nginx-live
-    ports:
-      - "8080:80"
+  edge-go:
+    build:
+      context: .
+      dockerfile: Dockerfile.edge
     environment:
       - ORYX_SERVER=${ORYX_SERVER}
       - ORYX_SERVER2=${ORYX_SERVER2}
       - PERYA_SERVER=${PERYA_SERVER}
-      - SRS_M3U8_EXPIRE=${SRS_M3U8_EXPIRE}
-      - SRS_TS_EXPIRE=${SRS_TS_EXPIRE}
       - PRIME_STREAM_HOST=${PRIME_STREAM_HOST}
       - PRIME_STREAM_ORIGIN=${PRIME_STREAM_ORIGIN}
       - PRIME_STREAM_REFERER=${PRIME_STREAM_REFERER}
+      - DISABLE_TLS_VERIFY=${DISABLE_TLS_VERIFY:-false}
+      - UPSTREAM_TIMEOUT=${UPSTREAM_TIMEOUT:-5s}
+      - CACHE_SIZE=${CACHE_SIZE:-512}
+      - CACHE_TTL_PLAYLIST=${CACHE_TTL_PLAYLIST:-2s}
+      - CACHE_TTL_SEGMENT=${CACHE_TTL_SEGMENT:-30s}
+      - PREFETCH_WORKERS=${PREFETCH_WORKERS:-4}
+      - PREFETCH_BATCH=${PREFETCH_BATCH:-5}
+      - ENABLE_PREFETCH=${ENABLE_PREFETCH:-true}
+    expose:
+      - "9000"
+    restart: unless-stopped
+
+  edge-proxy:
+    build: .
+    container_name: nginx-live
+    depends_on:
+      - edge-go
+    ports:
+      - "8080:80"
     restart: unless-stopped

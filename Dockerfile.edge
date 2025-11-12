@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1
+
+FROM golang:1.21-alpine AS builder
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
+
+COPY cmd ./cmd
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/edge ./cmd/edge
+
+FROM alpine:3.19
+WORKDIR /app
+COPY --from=builder /out/edge /usr/local/bin/edge
+
+ENV LISTEN_ADDR=":9000"
+EXPOSE 9000
+
+ENTRYPOINT ["/usr/local/bin/edge"]
