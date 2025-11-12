@@ -43,7 +43,7 @@ func main() {
 		MaxHeaderBytes:    http.DefaultMaxHeaderBytes,
 	}
 
-	log.Printf("edge proxy listening on %s (oryx=%v, perya=%s, sv=%v, uk=%s)", cfg.ListenAddr, cfg.OryxOrigins, cfg.PeryaOrigin, listSVNames(cfg.SVNamedOrigins), cfg.UKOrigin)
+	log.Printf("edge proxy listening on %s (oryx=%v, perya=%s, sv=%v, su=%v, uk=%s)", cfg.ListenAddr, cfg.OryxOrigins, cfg.PeryaOrigin, listOriginNames(cfg.SVNamedOrigins), listOriginNames(cfg.SUOrigins), cfg.UKOrigin)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server error: %v", err)
 	}
@@ -58,6 +58,9 @@ type config struct {
 	SVOrigin           string
 	SVHost             string
 	SVNamedOrigins     map[string]originConfig
+	SUOrigins          map[string]originConfig
+	SUReferer          string
+	SUSkipTLSVerify    bool
 	UKOrigin           string
 	UKHost             string
 	UKReferer          string
@@ -127,6 +130,12 @@ func loadConfig() (*config, error) {
 
 	svOrigin := strings.TrimSpace(os.Getenv("SV_ORIGIN"))
 	svHost := strings.TrimSpace(os.Getenv("SV_HOST_HEADER"))
+	suReferer := strings.TrimSpace(os.Getenv("SU_REFERER"))
+	suSkipVerify, err := parseBoolEnv("SU_SKIP_TLS_VERIFY", false)
+	if err != nil {
+		return nil, err
+	}
+	suOrigins := collectSUOrigins()
 	ukOrigin := strings.TrimSpace(os.Getenv("UK_ORIGIN"))
 	ukHost := strings.TrimSpace(os.Getenv("UK_HOST_HEADER"))
 	ukReferer := strings.TrimSpace(os.Getenv("UK_REFERER"))
@@ -197,6 +206,9 @@ func loadConfig() (*config, error) {
 		SVOrigin:           svOrigin,
 		SVHost:             svHost,
 		SVNamedOrigins:     svNamedOrigins,
+		SUOrigins:          suOrigins,
+		SUReferer:          suReferer,
+		SUSkipTLSVerify:    suSkipVerify,
 		UKOrigin:           ukOrigin,
 		UKHost:             ukHost,
 		UKReferer:          ukReferer,
@@ -269,6 +281,8 @@ type edgeProxy struct {
 	peryaTarget    *upstreamTarget
 	svTargets      map[string]*upstreamTarget
 	svPrefixes     []string
+	suTargets      map[string]*upstreamTarget
+	suPrefixes     []string
 	ukTarget       *upstreamTarget
 	primeOrigin    string
 	primeReferer   string
@@ -346,14 +360,7 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 		oryxNamed[name] = target
 		oryxPrefixes = append(oryxPrefixes, name)
 	}
-	if len(oryxPrefixes) > 1 {
-		sort.Slice(oryxPrefixes, func(i, j int) bool {
-			if len(oryxPrefixes[i]) == len(oryxPrefixes[j]) {
-				return oryxPrefixes[i] < oryxPrefixes[j]
-			}
-			return len(oryxPrefixes[i]) > len(oryxPrefixes[j])
-		})
-	}
+	sortNamedPrefixes(oryxPrefixes)
 
 	peryaURL, err := buildURL(cfg.PeryaOrigin)
 	if err != nil {
@@ -373,12 +380,22 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 			svTargets[name] = buildTarget(svURL, spec.Host, "", "", false)
 			svPrefixes = append(svPrefixes, name)
 		}
-		sort.Slice(svPrefixes, func(i, j int) bool {
-			if len(svPrefixes[i]) == len(svPrefixes[j]) {
-				return svPrefixes[i] < svPrefixes[j]
+		sortNamedPrefixes(svPrefixes)
+	}
+
+	var suTargets map[string]*upstreamTarget
+	var suPrefixes []string
+	if len(cfg.SUOrigins) > 0 {
+		suTargets = make(map[string]*upstreamTarget, len(cfg.SUOrigins))
+		for name, spec := range cfg.SUOrigins {
+			suURL, err := buildURL(spec.Origin)
+			if err != nil {
+				return nil, fmt.Errorf("invalid SU origin %s: %w", name, err)
 			}
-			return len(svPrefixes[i]) > len(svPrefixes[j])
-		})
+			suTargets[name] = buildTarget(suURL, spec.Host, "", cfg.SUReferer, cfg.SUSkipTLSVerify)
+			suPrefixes = append(suPrefixes, name)
+		}
+		sortNamedPrefixes(suPrefixes)
 	}
 
 	var ukTarget *upstreamTarget
@@ -433,6 +450,8 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 		peryaTarget:    peryaTarget,
 		svTargets:      svTargets,
 		svPrefixes:     svPrefixes,
+		suTargets:      suTargets,
+		suPrefixes:     suPrefixes,
 		ukTarget:       ukTarget,
 		primeOrigin:    cfg.PrimeOrigin,
 		primeReferer:   cfg.PrimeReferer,
@@ -644,6 +663,16 @@ func (p *edgeProxy) selectUpstream(path string) (*upstreamTarget, string, error)
 			return target, trimmed, nil
 		}
 		return nil, "", errors.New("SV origin not configured")
+	case strings.HasPrefix(path, "/__prefetch/su"):
+		if target, trimmed, ok := matchNamed(path, "/__prefetch", p.suPrefixes, p.suTargets); ok {
+			return target, trimmed, nil
+		}
+		return nil, "", errors.New("SU origin not configured")
+	case strings.HasPrefix(path, "/su"):
+		if target, trimmed, ok := matchNamed(path, "", p.suPrefixes, p.suTargets); ok {
+			return target, trimmed, nil
+		}
+		return nil, "", errors.New("SU origin not configured")
 	case strings.HasPrefix(path, "/__prefetch/uk"):
 		if p.ukTarget == nil {
 			return nil, "", errors.New("UK origin not configured")
@@ -829,6 +858,18 @@ func matchNamed(path, base string, prefixes []string, targets map[string]*upstre
 	return nil, "", false
 }
 
+func sortNamedPrefixes(prefixes []string) {
+	if len(prefixes) <= 1 {
+		return
+	}
+	sort.Slice(prefixes, func(i, j int) bool {
+		if len(prefixes[i]) == len(prefixes[j]) {
+			return prefixes[i] < prefixes[j]
+		}
+		return len(prefixes[i]) > len(prefixes[j])
+	})
+}
+
 func collectSVOrigins(defaultOrigin, defaultHost string) map[string]originConfig {
 	entries := make(map[string]originConfig)
 	addEntry := func(name, origin, host string) {
@@ -872,7 +913,40 @@ func collectSVOrigins(defaultOrigin, defaultHost string) map[string]originConfig
 	return entries
 }
 
-func listSVNames(origins map[string]originConfig) []string {
+func collectSUOrigins() map[string]originConfig {
+	var entries map[string]originConfig
+	for _, kv := range os.Environ() {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := parts[0]
+		if !strings.HasPrefix(key, "SU_ORIGIN") {
+			continue
+		}
+		origin := strings.TrimSpace(parts[1])
+		if origin == "" {
+			continue
+		}
+		suffix := strings.TrimPrefix(key, "SU_ORIGIN")
+		nameSuffix := strings.ToLower(strings.TrimSpace(suffix))
+		name := "su"
+		if nameSuffix != "" {
+			name += nameSuffix
+		}
+		host := strings.TrimSpace(os.Getenv("SU_HOST_HEADER" + suffix))
+		if entries == nil {
+			entries = make(map[string]originConfig)
+		}
+		entries[name] = originConfig{
+			Origin: origin,
+			Host:   host,
+		}
+	}
+	return entries
+}
+
+func listOriginNames(origins map[string]originConfig) []string {
 	if len(origins) == 0 {
 		return nil
 	}

@@ -35,6 +35,12 @@ services:
       - UK_HOST_HEADER=${UK_HOST_HEADER}
       - UK_REFERER=${UK_REFERER}
       - UK_SKIP_TLS_VERIFY=${UK_SKIP_TLS_VERIFY:-false}
+      - SU_ORIGIN1=${SU_ORIGIN1}
+      - SU_HOST_HEADER1=${SU_HOST_HEADER1}
+      - SU_ORIGIN2=${SU_ORIGIN2}
+      - SU_HOST_HEADER2=${SU_HOST_HEADER2}
+      - SU_REFERER=${SU_REFERER}
+      - SU_SKIP_TLS_VERIFY=${SU_SKIP_TLS_VERIFY:-false}
     expose:
       - "9000"
     restart: unless-stopped
