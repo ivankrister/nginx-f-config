@@ -420,7 +420,9 @@ func (p *edgeProxy) cacheContains(key string) bool {
 func (p *edgeProxy) applyCacheHeaders(header http.Header, path string) {
 	switch {
 	case isPlaylistPath(path):
-		header.Set("Cache-Control", "public, max-age=1")
+		header.Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		header.Set("Pragma", "no-cache")
+		header.Set("Expires", "0")
 	case isSegmentPath(path):
 		header.Set("Cache-Control", "public, max-age=30")
 	}
