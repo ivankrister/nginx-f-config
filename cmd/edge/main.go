@@ -13,6 +13,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -42,28 +43,50 @@ func main() {
 		MaxHeaderBytes:    http.DefaultMaxHeaderBytes,
 	}
 
-	log.Printf("edge proxy listening on %s (oryx=%v, perya=%s)", cfg.ListenAddr, cfg.OryxOrigins, cfg.PeryaOrigin)
+	log.Printf("edge proxy listening on %s (oryx=%v, perya=%s, sv=%v, uk=%s)", cfg.ListenAddr, cfg.OryxOrigins, cfg.PeryaOrigin, listSVNames(cfg.SVNamedOrigins), cfg.UKOrigin)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server error: %v", err)
 	}
 }
 
 type config struct {
-	ListenAddr        string
-	OryxOrigins       []string
-	PeryaOrigin       string
-	PrimeHost         string
-	PrimeOrigin       string
-	PrimeReferer      string
-	DisableTLSVerify  bool
-	UpstreamTimeout   time.Duration
-	UpstreamUserAgent string
-	CacheEntries      int
-	PlaylistTTL       time.Duration
-	SegmentTTL        time.Duration
-	PrefetchWorkers   int
-	PrefetchBatch     int
-	PrefetchEnabled   bool
+	ListenAddr         string
+	OryxOrigins        []string
+	OryxSkipTLSVerify  bool
+	PeryaOrigin        string
+	PeryaSkipTLSVerify bool
+	SVOrigin           string
+	SVHost             string
+	SVNamedOrigins     map[string]originConfig
+	UKOrigin           string
+	UKHost             string
+	UKReferer          string
+	UKSkipTLSVerify    bool
+	PrimeHost          string
+	PrimeOrigin        string
+	PrimeReferer       string
+	DisableTLSVerify   bool
+	UpstreamTimeout    time.Duration
+	UpstreamUserAgent  string
+	CacheEntries       int
+	PlaylistTTL        time.Duration
+	SegmentTTL         time.Duration
+	PrefetchWorkers    int
+	PrefetchBatch      int
+	PrefetchEnabled    bool
+}
+
+type upstreamTarget struct {
+	base          *url.URL
+	hostOverride  string
+	originHeader  string
+	refererHeader string
+	skipTLSVerify bool
+}
+
+type originConfig struct {
+	Origin string
+	Host   string
 }
 
 func loadConfig() (*config, error) {
@@ -88,11 +111,30 @@ func loadConfig() (*config, error) {
 	if len(oryxOrigins) == 0 {
 		return nil, errors.New("at least one ORYX_SERVER is required")
 	}
+	oryxSkipVerify, err := parseBoolEnv("ORYX_SKIP_TLS_VERIFY", false)
+	if err != nil {
+		return nil, err
+	}
 
 	perya := strings.TrimSpace(os.Getenv("PERYA_SERVER"))
 	if perya == "" {
 		return nil, errors.New("PERYA_SERVER is required")
 	}
+	peryaSkipVerify, err := parseBoolEnv("PERYA_SKIP_TLS_VERIFY", false)
+	if err != nil {
+		return nil, err
+	}
+
+	svOrigin := strings.TrimSpace(os.Getenv("SV_ORIGIN"))
+	svHost := strings.TrimSpace(os.Getenv("SV_HOST_HEADER"))
+	ukOrigin := strings.TrimSpace(os.Getenv("UK_ORIGIN"))
+	ukHost := strings.TrimSpace(os.Getenv("UK_HOST_HEADER"))
+	ukReferer := strings.TrimSpace(os.Getenv("UK_REFERER"))
+	ukSkipVerify, err := parseBoolEnv("UK_SKIP_TLS_VERIFY", false)
+	if err != nil {
+		return nil, err
+	}
+	svNamedOrigins := collectSVOrigins(svOrigin, svHost)
 
 	timeout := 5 * time.Second
 	if raw := strings.TrimSpace(os.Getenv("UPSTREAM_TIMEOUT")); raw != "" {
@@ -147,21 +189,30 @@ func loadConfig() (*config, error) {
 	}
 
 	return &config{
-		ListenAddr:        getenv("LISTEN_ADDR", ":9000"),
-		OryxOrigins:       oryxOrigins,
-		PeryaOrigin:       perya,
-		PrimeHost:         getenv("PRIME_STREAM_HOST", ""),
-		PrimeOrigin:       getenv("PRIME_STREAM_ORIGIN", ""),
-		PrimeReferer:      getenv("PRIME_STREAM_REFERER", ""),
-		DisableTLSVerify:  disableTLS,
-		UpstreamTimeout:   timeout,
-		UpstreamUserAgent: getenv("EDGE_USER_AGENT", defaultUserAgent),
-		CacheEntries:      cacheEntries,
-		PlaylistTTL:       playlistTTL,
-		SegmentTTL:        segmentTTL,
-		PrefetchWorkers:   prefetchWorkers,
-		PrefetchBatch:     prefetchBatch,
-		PrefetchEnabled:   prefetchEnabled,
+		ListenAddr:         getenv("LISTEN_ADDR", ":9000"),
+		OryxOrigins:        oryxOrigins,
+		OryxSkipTLSVerify:  oryxSkipVerify,
+		PeryaOrigin:        perya,
+		PeryaSkipTLSVerify: peryaSkipVerify,
+		SVOrigin:           svOrigin,
+		SVHost:             svHost,
+		SVNamedOrigins:     svNamedOrigins,
+		UKOrigin:           ukOrigin,
+		UKHost:             ukHost,
+		UKReferer:          ukReferer,
+		UKSkipTLSVerify:    ukSkipVerify,
+		PrimeHost:          getenv("PRIME_STREAM_HOST", ""),
+		PrimeOrigin:        getenv("PRIME_STREAM_ORIGIN", ""),
+		PrimeReferer:       getenv("PRIME_STREAM_REFERER", ""),
+		DisableTLSVerify:   disableTLS,
+		UpstreamTimeout:    timeout,
+		UpstreamUserAgent:  getenv("EDGE_USER_AGENT", defaultUserAgent),
+		CacheEntries:       cacheEntries,
+		PlaylistTTL:        playlistTTL,
+		SegmentTTL:         segmentTTL,
+		PrefetchWorkers:    prefetchWorkers,
+		PrefetchBatch:      prefetchBatch,
+		PrefetchEnabled:    prefetchEnabled,
 	}, nil
 }
 
@@ -195,24 +246,41 @@ func parseDurationEnv(key string, def time.Duration) (time.Duration, error) {
 	return dur, nil
 }
 
+func parseBoolEnv(key string, def bool) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def, nil
+	}
+	val, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s: %w", key, err)
+	}
+	return val, nil
+}
+
 const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
 type edgeProxy struct {
-	client        *http.Client
-	oryxTargets   []*url.URL
-	peryaTarget   *url.URL
-	primeHost     string
-	primeOrigin   string
-	primeReferer  string
-	userAgent     string
-	oryxCounter   atomic.Uint64
-	upstreamDelay time.Duration
-	cache         *ristretto.Cache
-	playlistTTL   time.Duration
-	segmentTTL    time.Duration
-	prefetchBatch int
-	prefetchSem   chan struct{}
-	prefetchOn    bool
+	clientStrict   *http.Client
+	clientInsecure *http.Client
+	oryxTargets    []*upstreamTarget
+	oryxNamed      map[string]*upstreamTarget
+	oryxPrefixes   []string
+	peryaTarget    *upstreamTarget
+	svTargets      map[string]*upstreamTarget
+	svPrefixes     []string
+	ukTarget       *upstreamTarget
+	primeOrigin    string
+	primeReferer   string
+	userAgent      string
+	oryxCounter    atomic.Uint64
+	upstreamDelay  time.Duration
+	cache          *ristretto.Cache
+	playlistTTL    time.Duration
+	segmentTTL     time.Duration
+	prefetchBatch  int
+	prefetchSem    chan struct{}
+	prefetchOn     bool
 }
 
 func newEdgeProxy(cfg *config) (*edgeProxy, error) {
@@ -236,36 +304,102 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 		return u, nil
 	}
 
-	var oryxURLs []*url.URL
-	for _, origin := range cfg.OryxOrigins {
+	buildTarget := func(u *url.URL, hostOverride, originHeader, refererHeader string, skipTLS bool) *upstreamTarget {
+		return &upstreamTarget{
+			base:          u,
+			hostOverride:  strings.TrimSpace(hostOverride),
+			originHeader:  strings.TrimSpace(originHeader),
+			refererHeader: strings.TrimSpace(refererHeader),
+			skipTLSVerify: skipTLS,
+		}
+	}
+
+	buildTransport := func(skipVerify bool) *http.Transport {
+		return &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			MaxIdleConns:          256,
+			IdleConnTimeout:       90 * time.Second,
+			ForceAttemptHTTP2:     true,
+			TLSHandshakeTimeout:   5 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: skipVerify, //nolint:gosec
+			},
+		}
+	}
+
+	var oryxTargets []*upstreamTarget
+	var oryxNamed map[string]*upstreamTarget
+	var oryxPrefixes []string
+	for idx, origin := range cfg.OryxOrigins {
 		u, err := buildURL(origin)
 		if err != nil {
 			return nil, fmt.Errorf("invalid ORYX origin %q: %w", origin, err)
 		}
-		oryxURLs = append(oryxURLs, u)
+		target := buildTarget(u, cfg.PrimeHost, "", "", cfg.OryxSkipTLSVerify)
+		oryxTargets = append(oryxTargets, target)
+		if oryxNamed == nil {
+			oryxNamed = make(map[string]*upstreamTarget, len(cfg.OryxOrigins))
+		}
+		name := fmt.Sprintf("ps%d", idx+1)
+		oryxNamed[name] = target
+		oryxPrefixes = append(oryxPrefixes, name)
+	}
+	if len(oryxPrefixes) > 1 {
+		sort.Slice(oryxPrefixes, func(i, j int) bool {
+			if len(oryxPrefixes[i]) == len(oryxPrefixes[j]) {
+				return oryxPrefixes[i] < oryxPrefixes[j]
+			}
+			return len(oryxPrefixes[i]) > len(oryxPrefixes[j])
+		})
 	}
 
 	peryaURL, err := buildURL(cfg.PeryaOrigin)
 	if err != nil {
 		return nil, fmt.Errorf("invalid PERYA origin: %w", err)
 	}
+	peryaTarget := buildTarget(peryaURL, cfg.PrimeHost, "", "", cfg.PeryaSkipTLSVerify)
 
-	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		MaxIdleConns:          256,
-		IdleConnTimeout:       90 * time.Second,
-		ForceAttemptHTTP2:     true,
-		TLSHandshakeTimeout:   5 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: cfg.DisableTLSVerify, //nolint:gosec
-		},
+	var svTargets map[string]*upstreamTarget
+	var svPrefixes []string
+	if len(cfg.SVNamedOrigins) > 0 {
+		svTargets = make(map[string]*upstreamTarget, len(cfg.SVNamedOrigins))
+		for name, spec := range cfg.SVNamedOrigins {
+			svURL, err := buildURL(spec.Origin)
+			if err != nil {
+				return nil, fmt.Errorf("invalid SV origin %s: %w", name, err)
+			}
+			svTargets[name] = buildTarget(svURL, spec.Host, "", "", false)
+			svPrefixes = append(svPrefixes, name)
+		}
+		sort.Slice(svPrefixes, func(i, j int) bool {
+			if len(svPrefixes[i]) == len(svPrefixes[j]) {
+				return svPrefixes[i] < svPrefixes[j]
+			}
+			return len(svPrefixes[i]) > len(svPrefixes[j])
+		})
 	}
 
-	client := &http.Client{
-		Transport: transport,
+	var ukTarget *upstreamTarget
+	if cfg.UKOrigin != "" {
+		ukURL, err := buildURL(cfg.UKOrigin)
+		if err != nil {
+			return nil, fmt.Errorf("invalid UK origin: %w", err)
+		}
+		ukTarget = buildTarget(ukURL, cfg.UKHost, "", cfg.UKReferer, cfg.UKSkipTLSVerify)
+	}
+	strictTransport := buildTransport(cfg.DisableTLSVerify)
+	clientStrict := &http.Client{
+		Transport: strictTransport,
 		Timeout:   cfg.UpstreamTimeout,
+	}
+	clientInsecure := clientStrict
+	if !cfg.DisableTLSVerify {
+		clientInsecure = &http.Client{
+			Transport: buildTransport(true),
+			Timeout:   cfg.UpstreamTimeout,
+		}
 	}
 
 	var cache *ristretto.Cache
@@ -291,20 +425,25 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 	}
 
 	return &edgeProxy{
-		client:        client,
-		oryxTargets:   oryxURLs,
-		peryaTarget:   peryaURL,
-		primeHost:     cfg.PrimeHost,
-		primeOrigin:   cfg.PrimeOrigin,
-		primeReferer:  cfg.PrimeReferer,
-		userAgent:     cfg.UpstreamUserAgent,
-		upstreamDelay: cfg.UpstreamTimeout,
-		cache:         cache,
-		playlistTTL:   cfg.PlaylistTTL,
-		segmentTTL:    cfg.SegmentTTL,
-		prefetchBatch: cfg.PrefetchBatch,
-		prefetchSem:   prefetchSem,
-		prefetchOn:    cfg.PrefetchEnabled && cfg.PrefetchWorkers > 0 && cfg.PrefetchBatch > 0,
+		clientStrict:   clientStrict,
+		clientInsecure: clientInsecure,
+		oryxTargets:    oryxTargets,
+		oryxNamed:      oryxNamed,
+		oryxPrefixes:   oryxPrefixes,
+		peryaTarget:    peryaTarget,
+		svTargets:      svTargets,
+		svPrefixes:     svPrefixes,
+		ukTarget:       ukTarget,
+		primeOrigin:    cfg.PrimeOrigin,
+		primeReferer:   cfg.PrimeReferer,
+		userAgent:      cfg.UpstreamUserAgent,
+		upstreamDelay:  cfg.UpstreamTimeout,
+		cache:          cache,
+		playlistTTL:    cfg.PlaylistTTL,
+		segmentTTL:     cfg.SegmentTTL,
+		prefetchBatch:  cfg.PrefetchBatch,
+		prefetchSem:    prefetchSem,
+		prefetchOn:     cfg.PrefetchEnabled && cfg.PrefetchWorkers > 0 && cfg.PrefetchBatch > 0,
 	}, nil
 }
 
@@ -318,7 +457,12 @@ func (p *edgeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reqURL := buildRequestURL(target, upstreamPath, r.URL.RawQuery)
+	if target == nil || target.base == nil {
+		http.Error(w, "upstream target not configured", http.StatusBadGateway)
+		return
+	}
+
+	reqURL := buildRequestURL(target.base, upstreamPath, r.URL.RawQuery)
 	cacheKey := cacheKeyForURL(&reqURL)
 
 	if entry, prefetched, ok := p.getFromCache(cacheKey); ok {
@@ -326,7 +470,7 @@ func (p *edgeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := p.fetchAndStore(ctx, &reqURL, false)
+	resp, err := p.fetchAndStore(ctx, &reqURL, target, false)
 	if err != nil {
 		log.Printf("upstream request to %s failed: %v", reqURL.Redacted(), err)
 		http.Error(w, "upstream fetch failed", http.StatusBadGateway)
@@ -341,8 +485,8 @@ func (p *edgeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.writeResponse(w, resp.header, resp.status, resp.body, "MISS", strconv.Itoa(prefetchCount))
 }
 
-func (p *edgeProxy) fetchAndStore(ctx context.Context, reqURL *url.URL, prefetched bool) (*cachedResponse, error) {
-	resp, err := p.fetchFromOrigin(ctx, reqURL)
+func (p *edgeProxy) fetchAndStore(ctx context.Context, reqURL *url.URL, target *upstreamTarget, prefetched bool) (*cachedResponse, error) {
+	resp, err := p.fetchFromOrigin(ctx, reqURL, target)
 	if err != nil {
 		return nil, err
 	}
@@ -350,23 +494,32 @@ func (p *edgeProxy) fetchAndStore(ctx context.Context, reqURL *url.URL, prefetch
 	return resp, nil
 }
 
-func (p *edgeProxy) fetchFromOrigin(ctx context.Context, reqURL *url.URL) (*cachedResponse, error) {
+func (p *edgeProxy) fetchFromOrigin(ctx context.Context, reqURL *url.URL, target *upstreamTarget) (*cachedResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
 
-	for key, value := range p.forwardHeaders() {
+	for key, value := range p.forwardHeaders(target) {
 		if value != "" {
 			req.Header.Set(key, value)
 		}
 	}
 
-	if host := p.primeHost; host != "" {
-		req.Host = host
+	if target == nil {
+		return nil, errors.New("missing upstream target")
 	}
 
-	resp, err := p.client.Do(req)
+	if target.hostOverride != "" {
+		req.Host = target.hostOverride
+	}
+
+	client := p.clientStrict
+	if target != nil && target.skipTLSVerify && p.clientInsecure != nil {
+		client = p.clientInsecure
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -438,33 +591,90 @@ func (p *edgeProxy) ttlForPath(path string) time.Duration {
 	return p.segmentTTL
 }
 
-func (p *edgeProxy) forwardHeaders() map[string]string {
+func (p *edgeProxy) forwardHeaders(target *upstreamTarget) map[string]string {
+	origin := p.primeOrigin
+	referer := p.primeReferer
+	if target != nil {
+		if target.originHeader != "" {
+			origin = target.originHeader
+		}
+		if target.refererHeader != "" {
+			referer = target.refererHeader
+		}
+	}
 	return map[string]string{
 		"User-Agent":         p.userAgent,
-		"Origin":             p.primeOrigin,
-		"Referer":            p.primeReferer,
+		"Origin":             origin,
+		"Referer":            referer,
 		"sec-ch-ua":          `"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"`,
 		"sec-ch-ua-mobile":   "?0",
 		"sec-ch-ua-platform": `"macOS"`,
 	}
 }
 
-func (p *edgeProxy) selectUpstream(path string) (*url.URL, string, error) {
+func (p *edgeProxy) selectUpstream(path string) (*upstreamTarget, string, error) {
 	switch {
 	case strings.HasPrefix(path, "/__prefetch/perya"):
+		if p.peryaTarget == nil {
+			return nil, "", errors.New("PERYA origin not configured")
+		}
 		return p.peryaTarget, trimPrefix(path, "/__prefetch"), nil
 	case strings.HasPrefix(path, "/perya/"):
+		if p.peryaTarget == nil {
+			return nil, "", errors.New("PERYA origin not configured")
+		}
 		return p.peryaTarget, trimPrefix(path, "/perya"), nil
+	case strings.HasPrefix(path, "/__prefetch/ps"):
+		if target, trimmed, ok := matchNamed(path, "/__prefetch", p.oryxPrefixes, p.oryxNamed); ok {
+			return target, trimmed, nil
+		}
+		return nil, "", errors.New("PS origin not configured")
+	case strings.HasPrefix(path, "/ps"):
+		if target, trimmed, ok := matchNamed(path, "", p.oryxPrefixes, p.oryxNamed); ok {
+			return target, trimmed, nil
+		}
+		return nil, "", errors.New("PS origin not configured")
+	case strings.HasPrefix(path, "/__prefetch/sv"):
+		if target, trimmed, ok := p.matchSV(path, "/__prefetch"); ok {
+			return target, trimmed, nil
+		}
+		return nil, "", errors.New("SV origin not configured")
+	case strings.HasPrefix(path, "/sv"):
+		if target, trimmed, ok := p.matchSV(path, ""); ok {
+			return target, trimmed, nil
+		}
+		return nil, "", errors.New("SV origin not configured")
+	case strings.HasPrefix(path, "/__prefetch/uk"):
+		if p.ukTarget == nil {
+			return nil, "", errors.New("UK origin not configured")
+		}
+		return p.ukTarget, trimPrefix(path, "/__prefetch/uk"), nil
+	case strings.HasPrefix(path, "/uk/"):
+		if p.ukTarget == nil {
+			return nil, "", errors.New("UK origin not configured")
+		}
+		return p.ukTarget, trimPrefix(path, "/uk"), nil
 	case strings.HasPrefix(path, "/__prefetch/"):
 		return p.pickOryx(), trimPrefix(path, "/__prefetch"), nil
 	case path == "":
 		return nil, "", errors.New("empty request path")
 	default:
-		return p.pickOryx(), path, nil
+		target := p.pickOryx()
+		if target == nil {
+			return nil, "", errors.New("ORYX origin not configured")
+		}
+		return target, path, nil
 	}
 }
 
-func (p *edgeProxy) pickOryx() *url.URL {
+func (p *edgeProxy) matchSV(path, base string) (*upstreamTarget, string, bool) {
+	return matchNamed(path, base, p.svPrefixes, p.svTargets)
+}
+
+func (p *edgeProxy) pickOryx() *upstreamTarget {
+	if len(p.oryxTargets) == 0 {
+		return nil
+	}
 	if len(p.oryxTargets) == 1 {
 		return p.oryxTargets[0]
 	}
@@ -472,12 +682,15 @@ func (p *edgeProxy) pickOryx() *url.URL {
 	return p.oryxTargets[int(index)%len(p.oryxTargets)]
 }
 
-func (p *edgeProxy) schedulePrefetch(target *url.URL, playlistPath string, body []byte) int {
+func (p *edgeProxy) schedulePrefetch(target *upstreamTarget, playlistPath string, body []byte) int {
+	if target == nil || target.base == nil {
+		return 0
+	}
 	if !p.prefetchOn || p.prefetchSem == nil || p.prefetchBatch <= 0 || len(body) == 0 {
 		return 0
 	}
 
-	playlistURL := buildRequestURL(target, playlistPath, "")
+	playlistURL := buildRequestURL(target.base, playlistPath, "")
 	lines := bytes.Split(body, []byte("\n"))
 	scheduled := 0
 
@@ -505,7 +718,7 @@ func (p *edgeProxy) schedulePrefetch(target *url.URL, playlistPath string, body 
 		}
 
 		scheduled++
-		p.spawnPrefetch(segURL)
+		p.spawnPrefetch(target, segURL)
 		if scheduled >= p.prefetchBatch {
 			break
 		}
@@ -514,8 +727,8 @@ func (p *edgeProxy) schedulePrefetch(target *url.URL, playlistPath string, body 
 	return scheduled
 }
 
-func (p *edgeProxy) spawnPrefetch(segURL *url.URL) {
-	if p.prefetchSem == nil {
+func (p *edgeProxy) spawnPrefetch(target *upstreamTarget, segURL *url.URL) {
+	if p.prefetchSem == nil || target == nil {
 		return
 	}
 
@@ -524,7 +737,7 @@ func (p *edgeProxy) spawnPrefetch(segURL *url.URL) {
 		defer func() { <-p.prefetchSem }()
 		ctx, cancel := context.WithTimeout(context.Background(), p.upstreamDelay)
 		defer cancel()
-		if _, err := p.fetchAndStore(ctx, segURL, true); err != nil {
+		if _, err := p.fetchAndStore(ctx, segURL, target, true); err != nil {
 			log.Printf("prefetch %s failed: %v", segURL.Redacted(), err)
 		}
 	}()
@@ -594,6 +807,81 @@ func boolToPrefetch(flag bool) string {
 		return "1"
 	}
 	return "0"
+}
+
+func matchNamed(path, base string, prefixes []string, targets map[string]*upstreamTarget) (*upstreamTarget, string, bool) {
+	if len(prefixes) == 0 || len(targets) == 0 {
+		return nil, "", false
+	}
+	for _, name := range prefixes {
+		candidate := base + "/" + name
+		if base == "" {
+			candidate = "/" + name
+		}
+		if path == candidate || strings.HasPrefix(path, candidate+"/") {
+			target := targets[name]
+			if target == nil {
+				continue
+			}
+			return target, trimPrefix(path, candidate), true
+		}
+	}
+	return nil, "", false
+}
+
+func collectSVOrigins(defaultOrigin, defaultHost string) map[string]originConfig {
+	entries := make(map[string]originConfig)
+	addEntry := func(name, origin, host string) {
+		origin = strings.TrimSpace(origin)
+		if origin == "" {
+			return
+		}
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" {
+			return
+		}
+		entries[key] = originConfig{
+			Origin: origin,
+			Host:   strings.TrimSpace(host),
+		}
+	}
+	if strings.TrimSpace(defaultOrigin) != "" {
+		addEntry("sv", defaultOrigin, defaultHost)
+	}
+	for _, kv := range os.Environ() {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := parts[0]
+		if !strings.HasPrefix(key, "SV_ORIGIN") || key == "SV_ORIGIN" {
+			continue
+		}
+		origin := strings.TrimSpace(parts[1])
+		if origin == "" {
+			continue
+		}
+		suffix := strings.TrimPrefix(key, "SV_ORIGIN")
+		host := strings.TrimSpace(os.Getenv("SV_HOST_HEADER" + suffix))
+		name := "sv" + strings.ToLower(strings.TrimSpace(suffix))
+		addEntry(name, origin, host)
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	return entries
+}
+
+func listSVNames(origins map[string]originConfig) []string {
+	if len(origins) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(origins))
+	for name := range origins {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func maxInt(a, b int) int {
