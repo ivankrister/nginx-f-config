@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,11 +17,100 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/dgraph-io/ristretto"
 )
+
+// Metrics holds monitoring data for the edge proxy
+type metrics struct {
+	// Cache metrics
+	cacheHits    atomic.Uint64
+	cacheMisses  atomic.Uint64
+	cacheSize    atomic.Uint64
+	cacheEvicted atomic.Uint64
+
+	// Prefetch metrics
+	prefetchScheduled atomic.Uint64
+	prefetchSuccess   atomic.Uint64
+	prefetchFailures  atomic.Uint64
+	prefetchActive    atomic.Int64
+
+	// Origin request metrics
+	originRequests   atomic.Uint64
+	originFailures   atomic.Uint64
+	originTimeouts   atomic.Uint64
+	originDNSErrors  atomic.Uint64
+	originConnErrors atomic.Uint64
+
+	// Request metrics by origin type
+	oryxRequests  atomic.Uint64
+	oryxFailures  atomic.Uint64
+	peryaRequests atomic.Uint64
+	peryaFailures atomic.Uint64
+	svRequests    atomic.Uint64
+	svFailures    atomic.Uint64
+	suRequests    atomic.Uint64
+	suFailures    atomic.Uint64
+	ukRequests    atomic.Uint64
+	ukFailures    atomic.Uint64
+
+	// Performance metrics
+	avgResponseTime atomic.Uint64 // in milliseconds
+	requestCount    atomic.Uint64
+
+	mu        sync.RWMutex
+	startTime time.Time
+}
+
+// MetricsSnapshot represents a point-in-time view of metrics
+type MetricsSnapshot struct {
+	Timestamp time.Time `json:"timestamp"`
+	Uptime    string    `json:"uptime"`
+
+	// Cache metrics
+	CacheHits     uint64  `json:"cache_hits"`
+	CacheMisses   uint64  `json:"cache_misses"`
+	CacheHitRatio float64 `json:"cache_hit_ratio"`
+	CacheSize     uint64  `json:"cache_size"`
+	CacheEvicted  uint64  `json:"cache_evicted"`
+
+	// Prefetch metrics
+	PrefetchScheduled   uint64  `json:"prefetch_scheduled"`
+	PrefetchSuccess     uint64  `json:"prefetch_success"`
+	PrefetchFailures    uint64  `json:"prefetch_failures"`
+	PrefetchSuccessRate float64 `json:"prefetch_success_rate"`
+	PrefetchActive      int64   `json:"prefetch_active"`
+
+	// Origin request metrics
+	OriginRequests    uint64  `json:"origin_requests"`
+	OriginFailures    uint64  `json:"origin_failures"`
+	OriginFailureRate float64 `json:"origin_failure_rate"`
+	OriginTimeouts    uint64  `json:"origin_timeouts"`
+	OriginDNSErrors   uint64  `json:"origin_dns_errors"`
+	OriginConnErrors  uint64  `json:"origin_conn_errors"`
+
+	// Origin-specific metrics
+	OriginStats map[string]OriginMetrics `json:"origin_stats"`
+
+	// Performance metrics
+	AvgResponseTime uint64 `json:"avg_response_time_ms"`
+	RequestCount    uint64 `json:"request_count"`
+}
+
+type OriginMetrics struct {
+	Requests    uint64  `json:"requests"`
+	Failures    uint64  `json:"failures"`
+	FailureRate float64 `json:"failure_rate"`
+}
+
+func newMetrics() *metrics {
+	return &metrics{
+		startTime: time.Now(),
+	}
+}
 
 func main() {
 	cfg, err := loadConfig()
@@ -33,9 +123,14 @@ func main() {
 		log.Fatalf("proxy init error: %v", err)
 	}
 
+	// Create a mux to handle both proxy and metrics endpoints
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", proxy.ServeMetrics)
+	mux.HandleFunc("/", proxy.ServeHTTP)
+
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           proxy,
+		Handler:           mux,
 		ReadTimeout:       10 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      cfg.UpstreamTimeout + 5*time.Second,
@@ -43,7 +138,11 @@ func main() {
 		MaxHeaderBytes:    http.DefaultMaxHeaderBytes,
 	}
 
-	log.Printf("edge proxy listening on %s (oryx=%v, perya=%s, sv=%v, su=%v, uk=%s)", cfg.ListenAddr, cfg.OryxOrigins, cfg.PeryaOrigin, listOriginNames(cfg.SVNamedOrigins), listOriginNames(cfg.SUOrigins), cfg.UKOrigin)
+	// Start metrics logging
+	proxy.startMetricsLogging()
+
+	log.Printf("edge proxy listening on %s (oryx=%v, perya=%s, sv=%v, su=%v, acf=%v, uk=%s)", cfg.ListenAddr, cfg.OryxOrigins, cfg.PeryaOrigin, listOriginNames(cfg.SVNamedOrigins), listOriginNames(cfg.SUOrigins), listOriginNames(cfg.ACFOrigins), cfg.UKOrigin)
+	log.Printf("metrics endpoint available at %s/metrics", cfg.ListenAddr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server error: %v", err)
 	}
@@ -61,6 +160,7 @@ type config struct {
 	SUOrigins          map[string]originConfig
 	SUReferer          string
 	SUSkipTLSVerify    bool
+	ACFOrigins         map[string]originConfig
 	UKOrigin           string
 	UKHost             string
 	UKReferer          string
@@ -136,6 +236,7 @@ func loadConfig() (*config, error) {
 		return nil, err
 	}
 	suOrigins := collectSUOrigins()
+	acfOrigins := collectACFOrigins()
 	ukOrigin := strings.TrimSpace(os.Getenv("UK_ORIGIN"))
 	ukHost := strings.TrimSpace(os.Getenv("UK_HOST_HEADER"))
 	ukReferer := strings.TrimSpace(os.Getenv("UK_REFERER"))
@@ -209,6 +310,7 @@ func loadConfig() (*config, error) {
 		SUOrigins:          suOrigins,
 		SUReferer:          suReferer,
 		SUSkipTLSVerify:    suSkipVerify,
+		ACFOrigins:         acfOrigins,
 		UKOrigin:           ukOrigin,
 		UKHost:             ukHost,
 		UKReferer:          ukReferer,
@@ -283,6 +385,8 @@ type edgeProxy struct {
 	svPrefixes     []string
 	suTargets      map[string]*upstreamTarget
 	suPrefixes     []string
+	acfTargets     map[string]*upstreamTarget
+	acfPrefixes    []string
 	ukTarget       *upstreamTarget
 	primeOrigin    string
 	primeReferer   string
@@ -295,6 +399,7 @@ type edgeProxy struct {
 	prefetchBatch  int
 	prefetchSem    chan struct{}
 	prefetchOn     bool
+	metrics        *metrics
 }
 
 func newEdgeProxy(cfg *config) (*edgeProxy, error) {
@@ -398,6 +503,21 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 		sortNamedPrefixes(suPrefixes)
 	}
 
+	var acfTargets map[string]*upstreamTarget
+	var acfPrefixes []string
+	if len(cfg.ACFOrigins) > 0 {
+		acfTargets = make(map[string]*upstreamTarget, len(cfg.ACFOrigins))
+		for name, spec := range cfg.ACFOrigins {
+			acfURL, err := buildURL(spec.Origin)
+			if err != nil {
+				return nil, fmt.Errorf("invalid ACF origin %s: %w", name, err)
+			}
+			acfTargets[name] = buildTarget(acfURL, spec.Host, "", "", false)
+			acfPrefixes = append(acfPrefixes, name)
+		}
+		sortNamedPrefixes(acfPrefixes)
+	}
+
 	var ukTarget *upstreamTarget
 	if cfg.UKOrigin != "" {
 		ukURL, err := buildURL(cfg.UKOrigin)
@@ -452,6 +572,8 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 		svPrefixes:     svPrefixes,
 		suTargets:      suTargets,
 		suPrefixes:     suPrefixes,
+		acfTargets:     acfTargets,
+		acfPrefixes:    acfPrefixes,
 		ukTarget:       ukTarget,
 		primeOrigin:    cfg.PrimeOrigin,
 		primeReferer:   cfg.PrimeReferer,
@@ -463,10 +585,14 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 		prefetchBatch:  cfg.PrefetchBatch,
 		prefetchSem:    prefetchSem,
 		prefetchOn:     cfg.PrefetchEnabled && cfg.PrefetchWorkers > 0 && cfg.PrefetchBatch > 0,
+		metrics:        newMetrics(),
 	}, nil
 }
 
 func (p *edgeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	p.metrics.requestCount.Add(1)
+
 	ctx, cancel := context.WithTimeout(r.Context(), p.upstreamDelay)
 	defer cancel()
 
@@ -485,12 +611,16 @@ func (p *edgeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cacheKey := cacheKeyForURL(&reqURL)
 
 	if entry, prefetched, ok := p.getFromCache(cacheKey); ok {
+		p.metrics.cacheHits.Add(1)
 		p.writeResponse(w, entry.header, entry.status, entry.body, "HIT", boolToPrefetch(prefetched))
+		p.updateResponseTime(start)
 		return
 	}
 
+	p.metrics.cacheMisses.Add(1)
 	resp, err := p.fetchAndStore(ctx, &reqURL, target, false)
 	if err != nil {
+		p.recordOriginFailure(target, err)
 		log.Printf("upstream request to %s failed: %v", reqURL.Redacted(), err)
 		http.Error(w, "upstream fetch failed", http.StatusBadGateway)
 		return
@@ -502,6 +632,7 @@ func (p *edgeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.writeResponse(w, resp.header, resp.status, resp.body, "MISS", strconv.Itoa(prefetchCount))
+	p.updateResponseTime(start)
 }
 
 func (p *edgeProxy) fetchAndStore(ctx context.Context, reqURL *url.URL, target *upstreamTarget, prefetched bool) (*cachedResponse, error) {
@@ -514,6 +645,9 @@ func (p *edgeProxy) fetchAndStore(ctx context.Context, reqURL *url.URL, target *
 }
 
 func (p *edgeProxy) fetchFromOrigin(ctx context.Context, reqURL *url.URL, target *upstreamTarget) (*cachedResponse, error) {
+	p.metrics.originRequests.Add(1)
+	p.incrementOriginRequest(target)
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
 	if err != nil {
 		return nil, err
@@ -534,7 +668,7 @@ func (p *edgeProxy) fetchFromOrigin(ctx context.Context, reqURL *url.URL, target
 	}
 
 	client := p.clientStrict
-	if target != nil && target.skipTLSVerify && p.clientInsecure != nil {
+	if target.skipTLSVerify && p.clientInsecure != nil {
 		client = p.clientInsecure
 	}
 
@@ -587,6 +721,235 @@ func (p *edgeProxy) cacheContains(key string) bool {
 	}
 	_, ok := p.cache.Get(key)
 	return ok
+}
+
+// updateResponseTime calculates and stores average response time
+func (p *edgeProxy) updateResponseTime(start time.Time) {
+	duration := time.Since(start).Milliseconds()
+	if duration >= 0 {
+		p.metrics.avgResponseTime.Store(uint64(duration))
+	}
+}
+
+// recordOriginFailure records failures and categorizes them by error type
+func (p *edgeProxy) recordOriginFailure(target *upstreamTarget, err error) {
+	p.metrics.originFailures.Add(1)
+	p.incrementOriginFailure(target)
+
+	if err == nil {
+		return
+	}
+
+	errStr := err.Error()
+	switch {
+	case strings.Contains(errStr, "timeout") || strings.Contains(errStr, "context deadline exceeded"):
+		p.metrics.originTimeouts.Add(1)
+	case strings.Contains(errStr, "no such host") || strings.Contains(errStr, "dns"):
+		p.metrics.originDNSErrors.Add(1)
+	case strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "connect"):
+		p.metrics.originConnErrors.Add(1)
+	}
+}
+
+// incrementOriginRequest increments request counter for specific origin
+func (p *edgeProxy) incrementOriginRequest(target *upstreamTarget) {
+	if target == nil || target.base == nil {
+		return
+	}
+
+	switch {
+	case p.isOryxTarget(target):
+		p.metrics.oryxRequests.Add(1)
+	case target == p.peryaTarget:
+		p.metrics.peryaRequests.Add(1)
+	case p.isSVTarget(target):
+		p.metrics.svRequests.Add(1)
+	case p.isSUTarget(target):
+		p.metrics.suRequests.Add(1)
+	case target == p.ukTarget:
+		p.metrics.ukRequests.Add(1)
+	}
+}
+
+// incrementOriginFailure increments failure counter for specific origin
+func (p *edgeProxy) incrementOriginFailure(target *upstreamTarget) {
+	if target == nil || target.base == nil {
+		return
+	}
+
+	switch {
+	case p.isOryxTarget(target):
+		p.metrics.oryxFailures.Add(1)
+	case target == p.peryaTarget:
+		p.metrics.peryaFailures.Add(1)
+	case p.isSVTarget(target):
+		p.metrics.svFailures.Add(1)
+	case p.isSUTarget(target):
+		p.metrics.suFailures.Add(1)
+	case target == p.ukTarget:
+		p.metrics.ukFailures.Add(1)
+	}
+}
+
+// Helper methods to identify target types
+func (p *edgeProxy) isOryxTarget(target *upstreamTarget) bool {
+	for _, t := range p.oryxTargets {
+		if t == target {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *edgeProxy) isSVTarget(target *upstreamTarget) bool {
+	for _, t := range p.svTargets {
+		if t == target {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *edgeProxy) isSUTarget(target *upstreamTarget) bool {
+	for _, t := range p.suTargets {
+		if t == target {
+			return true
+		}
+	}
+	return false
+}
+
+// getSnapshot returns a point-in-time snapshot of all metrics
+func (m *metrics) getSnapshot() MetricsSnapshot {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	cacheHits := m.cacheHits.Load()
+	cacheMisses := m.cacheMisses.Load()
+	totalCache := cacheHits + cacheMisses
+
+	prefetchScheduled := m.prefetchScheduled.Load()
+	prefetchSuccess := m.prefetchSuccess.Load()
+	prefetchFailures := m.prefetchFailures.Load()
+	totalPrefetch := prefetchSuccess + prefetchFailures
+
+	originRequests := m.originRequests.Load()
+	originFailures := m.originFailures.Load()
+
+	var cacheHitRatio, prefetchSuccessRate, originFailureRate float64
+
+	if totalCache > 0 {
+		cacheHitRatio = float64(cacheHits) / float64(totalCache) * 100
+	}
+
+	if totalPrefetch > 0 {
+		prefetchSuccessRate = float64(prefetchSuccess) / float64(totalPrefetch) * 100
+	}
+
+	if originRequests > 0 {
+		originFailureRate = float64(originFailures) / float64(originRequests) * 100
+	}
+
+	originStats := map[string]OriginMetrics{
+		"oryx": {
+			Requests:    m.oryxRequests.Load(),
+			Failures:    m.oryxFailures.Load(),
+			FailureRate: calculateFailureRate(m.oryxRequests.Load(), m.oryxFailures.Load()),
+		},
+		"perya": {
+			Requests:    m.peryaRequests.Load(),
+			Failures:    m.peryaFailures.Load(),
+			FailureRate: calculateFailureRate(m.peryaRequests.Load(), m.peryaFailures.Load()),
+		},
+		"sv": {
+			Requests:    m.svRequests.Load(),
+			Failures:    m.svFailures.Load(),
+			FailureRate: calculateFailureRate(m.svRequests.Load(), m.svFailures.Load()),
+		},
+		"su": {
+			Requests:    m.suRequests.Load(),
+			Failures:    m.suFailures.Load(),
+			FailureRate: calculateFailureRate(m.suRequests.Load(), m.suFailures.Load()),
+		},
+		"uk": {
+			Requests:    m.ukRequests.Load(),
+			Failures:    m.ukFailures.Load(),
+			FailureRate: calculateFailureRate(m.ukRequests.Load(), m.ukFailures.Load()),
+		},
+	}
+
+	return MetricsSnapshot{
+		Timestamp:           time.Now(),
+		Uptime:              time.Since(m.startTime).String(),
+		CacheHits:           cacheHits,
+		CacheMisses:         cacheMisses,
+		CacheHitRatio:       cacheHitRatio,
+		CacheSize:           m.cacheSize.Load(),
+		CacheEvicted:        m.cacheEvicted.Load(),
+		PrefetchScheduled:   prefetchScheduled,
+		PrefetchSuccess:     prefetchSuccess,
+		PrefetchFailures:    prefetchFailures,
+		PrefetchSuccessRate: prefetchSuccessRate,
+		PrefetchActive:      m.prefetchActive.Load(),
+		OriginRequests:      originRequests,
+		OriginFailures:      originFailures,
+		OriginFailureRate:   originFailureRate,
+		OriginTimeouts:      m.originTimeouts.Load(),
+		OriginDNSErrors:     m.originDNSErrors.Load(),
+		OriginConnErrors:    m.originConnErrors.Load(),
+		OriginStats:         originStats,
+		AvgResponseTime:     m.avgResponseTime.Load(),
+		RequestCount:        m.requestCount.Load(),
+	}
+}
+
+func calculateFailureRate(requests, failures uint64) float64 {
+	if requests == 0 {
+		return 0
+	}
+	return float64(failures) / float64(requests) * 100
+}
+
+// ServeMetrics handles HTTP requests for metrics endpoint
+func (p *edgeProxy) ServeMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	snapshot := p.metrics.getSnapshot()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if err := json.NewEncoder(w).Encode(snapshot); err != nil {
+		log.Printf("error encoding metrics: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+}
+
+// startMetricsLogging starts a goroutine that logs metrics periodically
+func (p *edgeProxy) startMetricsLogging() {
+	go func() {
+		ticker := time.NewTicker(60 * time.Second) // Log every minute
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				snapshot := p.metrics.getSnapshot()
+				log.Printf("METRICS: requests=%d cache_hit_ratio=%.1f%% prefetch_success=%.1f%% origin_failures=%.1f%% active_prefetch=%d avg_response_ms=%d",
+					snapshot.RequestCount,
+					snapshot.CacheHitRatio,
+					snapshot.PrefetchSuccessRate,
+					snapshot.OriginFailureRate,
+					snapshot.PrefetchActive,
+					snapshot.AvgResponseTime,
+				)
+			}
+		}
+	}()
 }
 
 func (p *edgeProxy) applyCacheHeaders(header http.Header, path string) {
@@ -673,6 +1036,16 @@ func (p *edgeProxy) selectUpstream(path string) (*upstreamTarget, string, error)
 			return target, trimmed, nil
 		}
 		return nil, "", errors.New("SU origin not configured")
+	case strings.HasPrefix(path, "/__prefetch/acf"):
+		if target, trimmed, ok := matchNamed(path, "/__prefetch", p.acfPrefixes, p.acfTargets); ok {
+			return target, trimmed, nil
+		}
+		return nil, "", errors.New("ACF origin not configured")
+	case strings.HasPrefix(path, "/acf"):
+		if target, trimmed, ok := matchNamed(path, "", p.acfPrefixes, p.acfTargets); ok {
+			return target, trimmed, nil
+		}
+		return nil, "", errors.New("ACF origin not configured")
 	case strings.HasPrefix(path, "/__prefetch/uk"):
 		if p.ukTarget == nil {
 			return nil, "", errors.New("UK origin not configured")
@@ -747,6 +1120,7 @@ func (p *edgeProxy) schedulePrefetch(target *upstreamTarget, playlistPath string
 		}
 
 		scheduled++
+		p.metrics.prefetchScheduled.Add(1)
 		p.spawnPrefetch(target, segURL)
 		if scheduled >= p.prefetchBatch {
 			break
@@ -762,12 +1136,19 @@ func (p *edgeProxy) spawnPrefetch(target *upstreamTarget, segURL *url.URL) {
 	}
 
 	p.prefetchSem <- struct{}{}
+	p.metrics.prefetchActive.Add(1)
 	go func() {
-		defer func() { <-p.prefetchSem }()
+		defer func() {
+			<-p.prefetchSem
+			p.metrics.prefetchActive.Add(-1)
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), p.upstreamDelay)
 		defer cancel()
 		if _, err := p.fetchAndStore(ctx, segURL, target, true); err != nil {
+			p.metrics.prefetchFailures.Add(1)
 			log.Printf("prefetch %s failed: %v", segURL.Redacted(), err)
+		} else {
+			p.metrics.prefetchSuccess.Add(1)
 		}
 	}()
 }
@@ -935,6 +1316,39 @@ func collectSUOrigins() map[string]originConfig {
 			name += nameSuffix
 		}
 		host := strings.TrimSpace(os.Getenv("SU_HOST_HEADER" + suffix))
+		if entries == nil {
+			entries = make(map[string]originConfig)
+		}
+		entries[name] = originConfig{
+			Origin: origin,
+			Host:   host,
+		}
+	}
+	return entries
+}
+
+func collectACFOrigins() map[string]originConfig {
+	var entries map[string]originConfig
+	for _, kv := range os.Environ() {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := parts[0]
+		if !strings.HasPrefix(key, "ACF_ORIGIN") {
+			continue
+		}
+		origin := strings.TrimSpace(parts[1])
+		if origin == "" {
+			continue
+		}
+		suffix := strings.TrimPrefix(key, "ACF_ORIGIN")
+		nameSuffix := strings.ToLower(strings.TrimSpace(suffix))
+		name := "acf"
+		if nameSuffix != "" {
+			name += nameSuffix
+		}
+		host := strings.TrimSpace(os.Getenv("ACF_HOST_HEADER" + suffix))
 		if entries == nil {
 			entries = make(map[string]originConfig)
 		}

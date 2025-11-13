@@ -19,6 +19,12 @@ server {
     proxy_read_timeout 10s;
     send_timeout 10s;
 
+    location /up {
+        access_log off;
+        return 200 "OK\n";
+        add_header Content-Type text/plain;
+    }
+
     location / {
         proxy_pass http://edge_go_backend;
         proxy_buffering off;

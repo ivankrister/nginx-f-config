@@ -41,6 +41,12 @@ services:
       - SU_HOST_HEADER2=${SU_HOST_HEADER2}
       - SU_REFERER=${SU_REFERER}
       - SU_SKIP_TLS_VERIFY=${SU_SKIP_TLS_VERIFY:-false}
+      - ACF_ORIGIN4=${ACF_ORIGIN4}
+      - ACF_HOST_HEADER4=${ACF_HOST_HEADER4}
+      - ACF_ORIGIN5=${ACF_ORIGIN5}
+      - ACF_HOST_HEADER5=${ACF_HOST_HEADER5}
+      - ACF_ORIGIN6=${ACF_ORIGIN6}
+      - ACF_HOST_HEADER6=${ACF_HOST_HEADER6}
     expose:
       - "9000"
     restart: unless-stopped

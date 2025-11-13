@@ -1,6 +1,9 @@
 # Environment variables
 .env
 
+# Sources folder
+sources/
+
 # Logs
 logs/
 *.log
