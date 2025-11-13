@@ -1,6 +1,6 @@
 # Edge Proxy Monitoring
 
-The edge proxy now includes comprehensive monitoring for cache performance, prefetch operations, and origin request failures.
+The edge proxy now includes comprehensive monitoring for cache performance, prefetch operations, and origin request failures with both JSON API and visual dashboard interfaces.
 
 ## Features Added
 
@@ -22,8 +22,28 @@ The edge proxy now includes comprehensive monitoring for cache performance, pref
 
 ## Accessing Metrics
 
-### HTTP Endpoint
+### 🎯 Visual Dashboard (Recommended)
 ```bash
+# Through nginx proxy
+http://localhost:8080/dashboard
+
+# Direct to Go service (if port 9000 is exposed)
+http://localhost:9000/dashboard
+```
+
+**Features:**
+- 📊 **Real-time charts** showing cache, prefetch, and origin metrics
+- 📈 **Interactive visualizations** with Chart.js
+- 🎨 **Beautiful responsive design** that works on desktop and mobile
+- ⚡ **Auto-refresh** every 10 seconds
+- 📋 **Detailed origin performance table** with failure rate indicators
+
+### 🔗 JSON API Endpoint
+```bash
+# Through nginx proxy (recommended)
+curl http://localhost:8080/metrics
+
+# Direct to Go service (if port 9000 is exposed)
 curl http://localhost:9000/metrics
 ```
 
@@ -129,3 +149,36 @@ Example Prometheus configuration:
   metrics_path: '/metrics'
   scrape_interval: 30s
 ```
+
+## Quick Start
+
+1. **Rebuild and start the containers:**
+   ```bash
+   docker-compose down
+   docker-compose build edge-go
+   docker-compose up -d
+   ```
+
+2. **Access the dashboard:**
+   - Open your browser and go to: `http://localhost:8080/dashboard`
+   - Or directly: `http://localhost:9000/dashboard` (if port 9000 is exposed)
+
+3. **View raw metrics:**
+   - JSON API: `http://localhost:8080/metrics`
+   - Or: `curl http://localhost:8080/metrics | jq`
+
+The dashboard will automatically refresh every 10 seconds and provides:
+- Real-time performance metrics
+- Interactive charts for cache, prefetch, and origin data
+- Color-coded failure rate indicators
+- Mobile-responsive design
+
+## Dashboard Screenshots
+
+The dashboard includes:
+- **Status Cards**: Key metrics at a glance (uptime, requests, cache hit ratio, response time, active prefetch)
+- **Cache Performance**: Doughnut chart showing hits vs misses
+- **Prefetch Operations**: Bar chart showing scheduled, successful, and failed prefetch operations
+- **Origin Distribution**: Pie chart showing request distribution across origins
+- **Error Analysis**: Bar chart breaking down error types (timeouts, DNS, connection)
+- **Detailed Table**: Per-origin statistics with color-coded failure rates

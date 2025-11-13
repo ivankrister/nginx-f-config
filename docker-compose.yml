@@ -39,6 +39,16 @@ services:
       - SU_HOST_HEADER1=${SU_HOST_HEADER1}
       - SU_ORIGIN2=${SU_ORIGIN2}
       - SU_HOST_HEADER2=${SU_HOST_HEADER2}
+      - SU_ORIGIN3=${SU_ORIGIN3}
+      - SU_HOST_HEADER3=${SU_HOST_HEADER3}
+      - SU_ORIGIN4=${SU_ORIGIN4}
+      - SU_HOST_HEADER4=${SU_HOST_HEADER4}
+      - SU_ORIGIN5=${SU_ORIGIN5}
+      - SU_HOST_HEADER5=${SU_HOST_HEADER5}
+      - SU_ORIGIN6=${SU_ORIGIN6}
+      - SU_HOST_HEADER6=${SU_HOST_HEADER6}
+      - SU_ORIGIN7=${SU_ORIGIN7}
+      - SU_HOST_HEADER7=${SU_HOST_HEADER7}
       - SU_REFERER=${SU_REFERER}
       - SU_SKIP_TLS_VERIFY=${SU_SKIP_TLS_VERIFY:-false}
       - ACF_ORIGIN4=${ACF_ORIGIN4}
@@ -47,6 +57,8 @@ services:
       - ACF_HOST_HEADER5=${ACF_HOST_HEADER5}
       - ACF_ORIGIN6=${ACF_ORIGIN6}
       - ACF_HOST_HEADER6=${ACF_HOST_HEADER6}
+    ports:
+      - "9000:9000"  # Expose metrics endpoint to host
     expose:
       - "9000"
     restart: unless-stopped

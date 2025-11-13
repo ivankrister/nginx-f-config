@@ -126,6 +126,7 @@ func main() {
 	// Create a mux to handle both proxy and metrics endpoints
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", proxy.ServeMetrics)
+	mux.HandleFunc("/dashboard", proxy.ServeDashboard)
 	mux.HandleFunc("/", proxy.ServeHTTP)
 
 	server := &http.Server{
@@ -143,6 +144,7 @@ func main() {
 
 	log.Printf("edge proxy listening on %s (oryx=%v, perya=%s, sv=%v, su=%v, acf=%v, uk=%s)", cfg.ListenAddr, cfg.OryxOrigins, cfg.PeryaOrigin, listOriginNames(cfg.SVNamedOrigins), listOriginNames(cfg.SUOrigins), listOriginNames(cfg.ACFOrigins), cfg.UKOrigin)
 	log.Printf("metrics endpoint available at %s/metrics", cfg.ListenAddr)
+	log.Printf("dashboard available at %s/dashboard", cfg.ListenAddr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server error: %v", err)
 	}
@@ -188,8 +190,9 @@ type upstreamTarget struct {
 }
 
 type originConfig struct {
-	Origin string
-	Host   string
+	Origin  string
+	Host    string
+	Referer string
 }
 
 func loadConfig() (*config, error) {
@@ -235,7 +238,7 @@ func loadConfig() (*config, error) {
 	if err != nil {
 		return nil, err
 	}
-	suOrigins := collectSUOrigins()
+	suOrigins := collectSUOrigins(suReferer)
 	acfOrigins := collectACFOrigins()
 	ukOrigin := strings.TrimSpace(os.Getenv("UK_ORIGIN"))
 	ukHost := strings.TrimSpace(os.Getenv("UK_HOST_HEADER"))
@@ -497,7 +500,11 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 			if err != nil {
 				return nil, fmt.Errorf("invalid SU origin %s: %w", name, err)
 			}
-			suTargets[name] = buildTarget(suURL, spec.Host, "", cfg.SUReferer, cfg.SUSkipTLSVerify)
+			referer := spec.Referer
+			if referer == "" {
+				referer = cfg.SUReferer
+			}
+			suTargets[name] = buildTarget(suURL, spec.Host, "", referer, cfg.SUSkipTLSVerify)
 			suPrefixes = append(suPrefixes, name)
 		}
 		sortNamedPrefixes(suPrefixes)
@@ -929,7 +936,30 @@ func (p *edgeProxy) ServeMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// startMetricsLogging starts a goroutine that logs metrics periodically
+// ServeDashboard serves the metrics dashboard HTML page
+func (p *edgeProxy) ServeDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read the dashboard HTML file
+	dashboardHTML, err := os.ReadFile("dashboard.html")
+	if err != nil {
+		log.Printf("error reading dashboard.html: %v", err)
+		http.Error(w, "Dashboard not available", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+
+	if _, err := w.Write(dashboardHTML); err != nil {
+		log.Printf("error serving dashboard: %v", err)
+	}
+} // startMetricsLogging starts a goroutine that logs metrics periodically
 func (p *edgeProxy) startMetricsLogging() {
 	go func() {
 		ticker := time.NewTicker(60 * time.Second) // Log every minute
@@ -1294,7 +1324,7 @@ func collectSVOrigins(defaultOrigin, defaultHost string) map[string]originConfig
 	return entries
 }
 
-func collectSUOrigins() map[string]originConfig {
+func collectSUOrigins(defaultReferer string) map[string]originConfig {
 	var entries map[string]originConfig
 	for _, kv := range os.Environ() {
 		parts := strings.SplitN(kv, "=", 2)
@@ -1316,12 +1346,17 @@ func collectSUOrigins() map[string]originConfig {
 			name += nameSuffix
 		}
 		host := strings.TrimSpace(os.Getenv("SU_HOST_HEADER" + suffix))
+		referer := strings.TrimSpace(os.Getenv("SU_REFERER" + suffix))
+		if referer == "" {
+			referer = defaultReferer
+		}
 		if entries == nil {
 			entries = make(map[string]originConfig)
 		}
 		entries[name] = originConfig{
-			Origin: origin,
-			Host:   host,
+			Origin:  origin,
+			Host:    host,
+			Referer: referer,
 		}
 	}
 	return entries
