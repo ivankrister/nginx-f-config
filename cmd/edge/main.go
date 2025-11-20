@@ -999,7 +999,7 @@ func (p *edgeProxy) startMetricsLogging() {
 func (p *edgeProxy) applyCacheHeaders(header http.Header, path string) {
 	switch {
 	case isPlaylistPath(path):
-		header.Set("Cache-Control", "public, max-age=1, must-revalidate")
+		header.Set("Cache-Control", "public, max-age=1")
 	case isSegmentPath(path):
 		header.Set("Cache-Control", "public, max-age=30")
 	}
