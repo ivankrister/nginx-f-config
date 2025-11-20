@@ -57,6 +57,7 @@ services:
       - ACF_HOST_HEADER5=${ACF_HOST_HEADER5}
       - ACF_ORIGIN6=${ACF_ORIGIN6}
       - ACF_HOST_HEADER6=${ACF_HOST_HEADER6}
+      - APL_ORIGIN=${APL_ORIGIN}
     ports:
       - "9000:9000"  # Expose metrics endpoint to host
     expose:

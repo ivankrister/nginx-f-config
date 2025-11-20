@@ -163,6 +163,7 @@ type config struct {
 	SUReferer          string
 	SUSkipTLSVerify    bool
 	ACFOrigins         map[string]originConfig
+	APLOrigin          string
 	UKOrigin           string
 	UKHost             string
 	UKReferer          string
@@ -240,6 +241,7 @@ func loadConfig() (*config, error) {
 	}
 	suOrigins := collectSUOrigins(suReferer)
 	acfOrigins := collectACFOrigins()
+	aplOrigin := strings.TrimSpace(os.Getenv("APL_ORIGIN"))
 	ukOrigin := strings.TrimSpace(os.Getenv("UK_ORIGIN"))
 	ukHost := strings.TrimSpace(os.Getenv("UK_HOST_HEADER"))
 	ukReferer := strings.TrimSpace(os.Getenv("UK_REFERER"))
@@ -314,6 +316,7 @@ func loadConfig() (*config, error) {
 		SUReferer:          suReferer,
 		SUSkipTLSVerify:    suSkipVerify,
 		ACFOrigins:         acfOrigins,
+		APLOrigin:          aplOrigin,
 		UKOrigin:           ukOrigin,
 		UKHost:             ukHost,
 		UKReferer:          ukReferer,
@@ -390,6 +393,7 @@ type edgeProxy struct {
 	suPrefixes     []string
 	acfTargets     map[string]*upstreamTarget
 	acfPrefixes    []string
+	aplTarget      *upstreamTarget
 	ukTarget       *upstreamTarget
 	primeOrigin    string
 	primeReferer   string
@@ -525,6 +529,15 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 		sortNamedPrefixes(acfPrefixes)
 	}
 
+	var aplTarget *upstreamTarget
+	if cfg.APLOrigin != "" {
+		aplURL, err := buildURL(cfg.APLOrigin)
+		if err != nil {
+			return nil, fmt.Errorf("invalid APL origin: %w", err)
+		}
+		aplTarget = buildTarget(aplURL, "", "", "", false)
+	}
+
 	var ukTarget *upstreamTarget
 	if cfg.UKOrigin != "" {
 		ukURL, err := buildURL(cfg.UKOrigin)
@@ -581,6 +594,7 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 		suPrefixes:     suPrefixes,
 		acfTargets:     acfTargets,
 		acfPrefixes:    acfPrefixes,
+		aplTarget:      aplTarget,
 		ukTarget:       ukTarget,
 		primeOrigin:    cfg.PrimeOrigin,
 		primeReferer:   cfg.PrimeReferer,
@@ -985,7 +999,7 @@ func (p *edgeProxy) startMetricsLogging() {
 func (p *edgeProxy) applyCacheHeaders(header http.Header, path string) {
 	switch {
 	case isPlaylistPath(path):
-		header.Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		header.Set("Cache-Control", "public, max-age=1, must-revalidate")
 		header.Set("Pragma", "no-cache")
 		header.Set("Expires", "0")
 	case isSegmentPath(path):
@@ -1061,11 +1075,23 @@ func (p *edgeProxy) selectUpstream(path string) (*upstreamTarget, string, error)
 			return target, trimmed, nil
 		}
 		return nil, "", errors.New("SU origin not configured")
+	case strings.HasPrefix(path, "/__prefetch/apl"):
+		if p.aplTarget == nil {
+			return nil, "", errors.New("APL origin not configured")
+		}
+		translated := trimPrefix(path, "/__prefetch/apl")
+		return p.aplTarget, translated, nil
 	case strings.HasPrefix(path, "/su"):
 		if target, trimmed, ok := matchNamed(path, "", p.suPrefixes, p.suTargets); ok {
 			return target, trimmed, nil
 		}
 		return nil, "", errors.New("SU origin not configured")
+	case strings.HasPrefix(path, "/apl"):
+		if p.aplTarget == nil {
+			return nil, "", errors.New("APL origin not configured")
+		}
+		translated := trimPrefix(path, "/apl")
+		return p.aplTarget, translated, nil
 	case strings.HasPrefix(path, "/__prefetch/acf"):
 		if target, trimmed, ok := matchNamed(path, "/__prefetch", p.acfPrefixes, p.acfTargets); ok {
 			return target, trimmed, nil
@@ -1200,7 +1226,6 @@ func (p *edgeProxy) writeResponse(w http.ResponseWriter, header http.Header, sta
 			w.Header().Add(k, v)
 		}
 	}
-	w.Header().Set("X-Go-Cache", cacheStatus)
 	w.Header().Set("X-Go-Cahce", cacheStatus)
 	w.Header().Set("X-Go-Prefetch", prefetchInfo)
 	w.WriteHeader(status)
@@ -1219,7 +1244,6 @@ func sanitizeHeader(src http.Header) http.Header {
 			dst.Add(k, v)
 		}
 	}
-	dst.Del("X-Go-Cache")
 	dst.Del("X-Go-Cahce")
 	dst.Del("X-Go-Prefetch")
 	dst.Del("X-Edge-Go")
