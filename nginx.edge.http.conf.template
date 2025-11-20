@@ -25,6 +25,16 @@ server {
         add_header Content-Type text/plain;
     }
 
+    location ~ ^/apl/.*\.(m3u8|ts)$ {
+        proxy_pass http://edge_go_backend;
+        proxy_buffering off;
+        add_header X-Go-Through "nginx-edge" always;
+    }
+
+    location /apl/ {
+        return 403;
+    }
+
     location / {
         proxy_pass http://edge_go_backend;
         proxy_buffering off;
