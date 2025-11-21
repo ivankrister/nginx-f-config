@@ -65,6 +65,8 @@ services:
       - ACF_ORIGIN6=${ACF_ORIGIN6}
       - ACF_HOST_HEADER6=${ACF_HOST_HEADER6}
       - APL_ORIGIN=${APL_ORIGIN}
+      - METRICS_RESET_DAILY=${METRICS_RESET_DAILY:-true}
+      - METRICS_RESET_TIME=${METRICS_RESET_TIME:-00:00}
     ports:
       - "9000:9000"  # Expose metrics endpoint to host
     expose:

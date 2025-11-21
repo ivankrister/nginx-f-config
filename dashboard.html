@@ -43,6 +43,38 @@
             opacity: 0.9;
         }
 
+        .reset-button {
+            background: rgba(220, 53, 69, 0.9);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 10px;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+
+        .reset-button:hover {
+            background: rgba(220, 53, 69, 1);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 15px rgba(220, 53, 69, 0.4);
+        }
+
+        .reset-button:active {
+            transform: translateY(0);
+        }
+
+        .reset-button:disabled {
+            background: rgba(108, 117, 125, 0.6);
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
         .dashboard-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -211,6 +243,7 @@
         <div class="header">
             <h1>🚀 Edge Proxy Dashboard</h1>
             <p>Real-time monitoring and metrics visualization</p>
+            <button class="reset-button" onclick="resetMetrics()" id="resetBtn">🔄 Reset Metrics</button>
         </div>
 
         <div id="loading" class="loading">
@@ -428,6 +461,58 @@
             if (!uptime) return '--';
             // Convert duration string like "2h15m30s" to a more readable format
             return uptime.replace(/(\d+)h/, '$1h ').replace(/(\d+)m/, '$1m ').replace(/(\d+)s/, '$1s');
+        }
+
+        // Reset metrics function
+        async function resetMetrics() {
+            if (!confirm('Are you sure you want to reset all metrics? This action cannot be undone.')) {
+                return;
+            }
+            
+            const resetBtn = document.getElementById('resetBtn');
+            resetBtn.disabled = true;
+            resetBtn.textContent = '🔄 Resetting...';
+            
+            try {
+                const response = await fetch('/reset-metrics', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Show success feedback
+                    resetBtn.textContent = '✅ Reset Complete';
+                    resetBtn.style.background = 'rgba(40, 167, 69, 0.9)';
+                    
+                    // Refresh metrics immediately
+                    setTimeout(() => {
+                        fetchMetrics();
+                        resetBtn.disabled = false;
+                        resetBtn.textContent = '🔄 Reset Metrics';
+                        resetBtn.style.background = 'rgba(220, 53, 69, 0.9)';
+                    }, 1500);
+                } else {
+                    throw new Error(data.message || 'Reset failed');
+                }
+            } catch (err) {
+                console.error('Failed to reset metrics:', err);
+                resetBtn.textContent = '❌ Reset Failed';
+                resetBtn.style.background = 'rgba(108, 117, 125, 0.9)';
+                
+                setTimeout(() => {
+                    resetBtn.disabled = false;
+                    resetBtn.textContent = '🔄 Reset Metrics';
+                    resetBtn.style.background = 'rgba(220, 53, 69, 0.9)';
+                }, 2000);
+            }
         }
 
         // Fetch metrics data

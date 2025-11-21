@@ -172,6 +172,49 @@ The dashboard will automatically refresh every 10 seconds and provides:
 - Interactive charts for cache, prefetch, and origin data
 - Color-coded failure rate indicators
 - Mobile-responsive design
+- **🔄 Manual Reset Button** with confirmation dialog
+
+## 🔄 **Metrics Reset Features**
+
+### **Automatic Daily Reset**
+By default, metrics reset daily at midnight (00:00). This helps maintain relevant daily statistics.
+
+**Configuration:**
+```bash
+# Enable/disable daily reset (default: true)
+METRICS_RESET_DAILY=true
+
+# Set reset time in HH:MM format (default: 00:00 for midnight)
+METRICS_RESET_TIME=00:00
+```
+
+**Examples:**
+- Reset at 6 AM: `METRICS_RESET_TIME=06:00`
+- Reset at midnight UTC: `METRICS_RESET_TIME=00:00`
+- Disable daily reset: `METRICS_RESET_DAILY=false`
+
+### **Manual Reset**
+Reset metrics immediately using either method:
+
+**1. Dashboard Button:**
+- Click the **🔄 Reset Metrics** button in the dashboard header
+- Confirm the action in the dialog box
+- All metrics will be cleared and start fresh
+
+**2. HTTP API:**
+```bash
+curl -X POST http://localhost:8080/reset-metrics
+# or direct: curl -X POST http://localhost:9000/reset-metrics
+```
+
+**What Gets Reset:**
+- ✅ All request counters (total, per-origin)
+- ✅ Cache statistics (hits, misses, evictions)
+- ✅ Prefetch statistics (scheduled, success, failures)
+- ✅ Error counters (timeouts, DNS, connection errors)
+- ✅ Performance metrics (response times)
+- ✅ Uptime counter (resets to current time)
+- ❌ Active prefetch count (represents current state)
 
 ## Dashboard Screenshots
 

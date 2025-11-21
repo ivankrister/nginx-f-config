@@ -173,6 +173,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", proxy.ServeMetrics)
 	mux.HandleFunc("/dashboard", proxy.ServeDashboard)
+	mux.HandleFunc("/reset-metrics", proxy.ServeMetricsReset)
 	mux.HandleFunc("/", proxy.ServeHTTP)
 
 	server := &http.Server{
@@ -187,6 +188,11 @@ func main() {
 
 	// Start metrics logging
 	proxy.startMetricsLogging()
+
+	// Start daily metrics reset if enabled
+	if cfg.MetricsResetDaily {
+		proxy.startDailyMetricsReset(cfg.MetricsResetTime)
+	}
 
 	log.Printf("edge proxy listening on %s (oryx=%v, perya=%s, sv=%v, su=%v, acf=%v, uk=%s)", cfg.ListenAddr, cfg.OryxOrigins, cfg.PeryaOrigin, listOriginNames(cfg.SVNamedOrigins), listOriginNames(cfg.SUOrigins), listOriginNames(cfg.ACFOrigins), cfg.UKOrigin)
 	log.Printf("metrics endpoint available at %s/metrics", cfg.ListenAddr)
@@ -1038,6 +1044,33 @@ func (p *edgeProxy) ServeDashboard(w http.ResponseWriter, r *http.Request) {
 
 	if _, err := w.Write(dashboardHTML); err != nil {
 		log.Printf("error serving dashboard: %v", err)
+	}
+}
+
+// ServeMetricsReset handles POST requests to reset metrics
+func (p *edgeProxy) ServeMetricsReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed - use POST", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Reset the metrics
+	p.metrics.reset()
+	
+	// Return success response
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	
+	response := map[string]interface{}{
+		"success": true,
+		"message": "Metrics reset successfully",
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+	
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Printf("error encoding reset response: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
 	}
 } // startMetricsLogging starts a goroutine that logs metrics periodically
 func (p *edgeProxy) startMetricsLogging() {
