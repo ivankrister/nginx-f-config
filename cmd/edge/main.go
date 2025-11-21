@@ -112,6 +112,52 @@ func newMetrics() *metrics {
 	}
 }
 
+// resetMetrics resets all metric counters to zero
+func (m *metrics) reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	// Reset cache metrics
+	m.cacheHits.Store(0)
+	m.cacheMisses.Store(0)
+	m.cacheSize.Store(0)
+	m.cacheEvicted.Store(0)
+	
+	// Reset prefetch metrics
+	m.prefetchScheduled.Store(0)
+	m.prefetchSuccess.Store(0)
+	m.prefetchFailures.Store(0)
+	// Note: prefetchActive is not reset as it represents current state
+	
+	// Reset origin request metrics
+	m.originRequests.Store(0)
+	m.originFailures.Store(0)
+	m.originTimeouts.Store(0)
+	m.originDNSErrors.Store(0)
+	m.originConnErrors.Store(0)
+	
+	// Reset request metrics by origin type
+	m.oryxRequests.Store(0)
+	m.oryxFailures.Store(0)
+	m.peryaRequests.Store(0)
+	m.peryaFailures.Store(0)
+	m.svRequests.Store(0)
+	m.svFailures.Store(0)
+	m.suRequests.Store(0)
+	m.suFailures.Store(0)
+	m.ukRequests.Store(0)
+	m.ukFailures.Store(0)
+	
+	// Reset performance metrics
+	m.avgResponseTime.Store(0)
+	m.requestCount.Store(0)
+	
+	// Reset start time to current time
+	m.startTime = time.Now()
+	
+	log.Println("Metrics have been reset")
+}
+
 func main() {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -180,6 +226,8 @@ type config struct {
 	PrefetchWorkers    int
 	PrefetchBatch      int
 	PrefetchEnabled    bool
+	MetricsResetDaily  bool
+	MetricsResetTime   string // Format: "HH:MM" (e.g., "00:00" for midnight)
 }
 
 type upstreamTarget struct {
@@ -303,6 +351,22 @@ func loadConfig() (*config, error) {
 		prefetchEnabled = val
 	}
 
+	// Parse metrics reset configuration
+	metricsResetDaily := true
+	if raw := strings.TrimSpace(os.Getenv("METRICS_RESET_DAILY")); raw != "" {
+		val, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid METRICS_RESET_DAILY: %w", err)
+		}
+		metricsResetDaily = val
+	}
+
+	metricsResetTime := getenv("METRICS_RESET_TIME", "00:00")
+	// Validate time format
+	if _, err := time.Parse("15:04", metricsResetTime); err != nil {
+		return nil, fmt.Errorf("invalid METRICS_RESET_TIME format (use HH:MM): %w", err)
+	}
+
 	return &config{
 		ListenAddr:         getenv("LISTEN_ADDR", ":9000"),
 		OryxOrigins:        oryxOrigins,
@@ -333,6 +397,8 @@ func loadConfig() (*config, error) {
 		PrefetchWorkers:    prefetchWorkers,
 		PrefetchBatch:      prefetchBatch,
 		PrefetchEnabled:    prefetchEnabled,
+		MetricsResetDaily:  metricsResetDaily,
+		MetricsResetTime:   metricsResetTime,
 	}, nil
 }
 
@@ -996,6 +1062,45 @@ func (p *edgeProxy) startMetricsLogging() {
 	}()
 }
 
+// startDailyMetricsReset starts a goroutine that resets metrics daily at specified time
+func (p *edgeProxy) startDailyMetricsReset(resetTime string) {
+	if resetTime == "" {
+		return
+	}
+	
+	go func() {
+		for {
+			// Calculate next reset time
+			now := time.Now()
+			resetTimeParsed, err := time.Parse("15:04", resetTime)
+			if err != nil {
+				log.Printf("Error parsing reset time %s: %v", resetTime, err)
+				return
+			}
+			
+			// Set the reset time to today
+			nextReset := time.Date(now.Year(), now.Month(), now.Day(), 
+				resetTimeParsed.Hour(), resetTimeParsed.Minute(), 0, 0, now.Location())
+			
+			// If the reset time for today has passed, schedule for tomorrow
+			if nextReset.Before(now) {
+				nextReset = nextReset.Add(24 * time.Hour)
+			}
+			
+			// Wait until the next reset time
+			timeUntilReset := nextReset.Sub(now)
+			log.Printf("Scheduled daily metrics reset at %s (in %s)", nextReset.Format("2006-01-02 15:04:05"), timeUntilReset.Round(time.Minute))
+			
+			timer := time.NewTimer(timeUntilReset)
+			<-timer.C
+			
+			// Reset metrics
+			p.metrics.reset()
+			log.Printf("Daily metrics reset completed at %s", time.Now().Format("2006-01-02 15:04:05"))
+		}
+	}()
+}
+
 func (p *edgeProxy) applyCacheHeaders(header http.Header, path string) {
 	switch {
 	case isPlaylistPath(path):
@@ -1016,15 +1121,23 @@ func (p *edgeProxy) ttlForPath(path string) time.Duration {
 }
 
 func (p *edgeProxy) forwardHeaders(target *upstreamTarget) map[string]string {
-	origin := p.primeOrigin
-	referer := p.primeReferer
+	var origin string
+	var referer string
 	if target != nil {
-		if target.originHeader != "" {
-			origin = target.originHeader
-		}
 		if target.refererHeader != "" {
 			referer = target.refererHeader
 		}
+		if target.originHeader != "" {
+			origin = target.originHeader
+		} else {
+			origin = originFromReferer(referer)
+		}
+	}
+	if origin == "" {
+		origin = p.primeOrigin
+	}
+	if referer == "" {
+		referer = p.primeReferer
 	}
 	return map[string]string{
 		"User-Agent":         p.userAgent,
@@ -1269,6 +1382,20 @@ func boolToPrefetch(flag bool) string {
 		return "1"
 	}
 	return "0"
+}
+
+func originFromReferer(referer string) string {
+	if referer == "" {
+		return ""
+	}
+	u, err := url.Parse(referer)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	u.Path = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }
 
 func matchNamed(path, base string, prefixes []string, targets map[string]*upstreamTarget) (*upstreamTarget, string, bool) {
