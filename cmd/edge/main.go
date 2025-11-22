@@ -791,6 +791,9 @@ func (p *edgeProxy) fetchFromOrigin(ctx context.Context, reqURL *url.URL, target
 	header.Set("Access-Control-Allow-Origin", "*")
 	p.applyCacheHeaders(header, reqURL.Path)
 	header.Set("X-Edge-Go", "1")
+	if target == p.aplTarget {
+		header.Del("Set-Cookie") // APL responses should not emit session cookies
+	}
 
 	return &cachedResponse{status: resp.StatusCode, header: header, body: body}, nil
 }
