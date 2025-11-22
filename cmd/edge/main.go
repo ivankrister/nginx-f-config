@@ -120,26 +120,26 @@ func newMetrics() *metrics {
 func (m *metrics) reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	// Reset cache metrics
 	m.cacheHits.Store(0)
 	m.cacheMisses.Store(0)
 	m.cacheSize.Store(0)
 	m.cacheEvicted.Store(0)
-	
+
 	// Reset prefetch metrics
 	m.prefetchScheduled.Store(0)
 	m.prefetchSuccess.Store(0)
 	m.prefetchFailures.Store(0)
 	// Note: prefetchActive is not reset as it represents current state
-	
+
 	// Reset origin request metrics
 	m.originRequests.Store(0)
 	m.originFailures.Store(0)
 	m.originTimeouts.Store(0)
 	m.originDNSErrors.Store(0)
 	m.originConnErrors.Store(0)
-	
+
 	// Reset request metrics by origin type
 	m.oryxRequests.Store(0)
 	m.oryxFailures.Store(0)
@@ -155,14 +155,14 @@ func (m *metrics) reset() {
 	m.ukFailures.Store(0)
 	m.aplRequests.Store(0)
 	m.aplFailures.Store(0)
-	
+
 	// Reset performance metrics
 	m.avgResponseTime.Store(0)
 	m.requestCount.Store(0)
-	
+
 	// Reset start time to current time
 	m.startTime = time.Now()
-	
+
 	log.Println("Metrics have been reset")
 }
 
@@ -223,6 +223,7 @@ type config struct {
 	SUReferer          string
 	SUSkipTLSVerify    bool
 	ACFOrigins         map[string]originConfig
+	ACFReferer         string
 	APLOrigin          string
 	UKOrigin           string
 	UKHost             string
@@ -302,7 +303,8 @@ func loadConfig() (*config, error) {
 		return nil, err
 	}
 	suOrigins := collectSUOrigins(suReferer)
-	acfOrigins := collectACFOrigins()
+	acfReferer := strings.TrimSpace(os.Getenv("ACF_REFERER"))
+	acfOrigins := collectACFOriginsWithDefault(acfReferer)
 	aplOrigin := strings.TrimSpace(os.Getenv("APL_ORIGIN"))
 	ukOrigin := strings.TrimSpace(os.Getenv("UK_ORIGIN"))
 	ukHost := strings.TrimSpace(os.Getenv("UK_HOST_HEADER"))
@@ -394,6 +396,7 @@ func loadConfig() (*config, error) {
 		SUReferer:          suReferer,
 		SUSkipTLSVerify:    suSkipVerify,
 		ACFOrigins:         acfOrigins,
+		ACFReferer:         acfReferer,
 		APLOrigin:          aplOrigin,
 		UKOrigin:           ukOrigin,
 		UKHost:             ukHost,
@@ -603,7 +606,7 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 			if err != nil {
 				return nil, fmt.Errorf("invalid ACF origin %s: %w", name, err)
 			}
-			acfTargets[name] = buildTarget(acfURL, spec.Host, "", "", false)
+			acfTargets[name] = buildTarget(acfURL, spec.Host, "", spec.Referer, false)
 			acfPrefixes = append(acfPrefixes, name)
 		}
 		sortNamedPrefixes(acfPrefixes)
@@ -1088,20 +1091,20 @@ func (p *edgeProxy) ServeMetricsReset(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed - use POST", http.StatusMethodNotAllowed)
 		return
 	}
-	
+
 	// Reset the metrics
 	p.metrics.reset()
-	
+
 	// Return success response
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	
+
 	response := map[string]interface{}{
-		"success": true,
-		"message": "Metrics reset successfully",
+		"success":   true,
+		"message":   "Metrics reset successfully",
 		"timestamp": time.Now().Format(time.RFC3339),
 	}
-	
+
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		log.Printf("error encoding reset response: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -1135,7 +1138,7 @@ func (p *edgeProxy) startDailyMetricsReset(resetTime string) {
 	if resetTime == "" {
 		return
 	}
-	
+
 	go func() {
 		for {
 			// Calculate next reset time
@@ -1145,23 +1148,23 @@ func (p *edgeProxy) startDailyMetricsReset(resetTime string) {
 				log.Printf("Error parsing reset time %s: %v", resetTime, err)
 				return
 			}
-			
+
 			// Set the reset time to today
-			nextReset := time.Date(now.Year(), now.Month(), now.Day(), 
+			nextReset := time.Date(now.Year(), now.Month(), now.Day(),
 				resetTimeParsed.Hour(), resetTimeParsed.Minute(), 0, 0, now.Location())
-			
+
 			// If the reset time for today has passed, schedule for tomorrow
 			if nextReset.Before(now) {
 				nextReset = nextReset.Add(24 * time.Hour)
 			}
-			
+
 			// Wait until the next reset time
 			timeUntilReset := nextReset.Sub(now)
 			log.Printf("Scheduled daily metrics reset at %s (in %s)", nextReset.Format("2006-01-02 15:04:05"), timeUntilReset.Round(time.Minute))
-			
+
 			timer := time.NewTimer(timeUntilReset)
 			<-timer.C
-			
+
 			// Reset metrics
 			p.metrics.reset()
 			log.Printf("Daily metrics reset completed at %s", time.Now().Format("2006-01-02 15:04:05"))
@@ -1580,6 +1583,10 @@ func collectSUOrigins(defaultReferer string) map[string]originConfig {
 }
 
 func collectACFOrigins() map[string]originConfig {
+	return collectACFOriginsWithDefault("")
+}
+
+func collectACFOriginsWithDefault(defaultReferer string) map[string]originConfig {
 	var entries map[string]originConfig
 	for _, kv := range os.Environ() {
 		parts := strings.SplitN(kv, "=", 2)
@@ -1601,12 +1608,17 @@ func collectACFOrigins() map[string]originConfig {
 			name += nameSuffix
 		}
 		host := strings.TrimSpace(os.Getenv("ACF_HOST_HEADER" + suffix))
+		referer := strings.TrimSpace(os.Getenv("ACF_REFERER" + suffix))
+		if referer == "" {
+			referer = defaultReferer
+		}
 		if entries == nil {
 			entries = make(map[string]originConfig)
 		}
 		entries[name] = originConfig{
-			Origin: origin,
-			Host:   host,
+			Origin:  origin,
+			Host:    host,
+			Referer: referer,
 		}
 	}
 	return entries
