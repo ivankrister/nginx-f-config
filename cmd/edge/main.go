@@ -54,8 +54,12 @@ type metrics struct {
 	svFailures    atomic.Uint64
 	suRequests    atomic.Uint64
 	suFailures    atomic.Uint64
+	acfRequests   atomic.Uint64
+	acfFailures   atomic.Uint64
 	ukRequests    atomic.Uint64
 	ukFailures    atomic.Uint64
+	aplRequests   atomic.Uint64
+	aplFailures   atomic.Uint64
 
 	// Performance metrics
 	avgResponseTime atomic.Uint64 // in milliseconds
@@ -145,8 +149,12 @@ func (m *metrics) reset() {
 	m.svFailures.Store(0)
 	m.suRequests.Store(0)
 	m.suFailures.Store(0)
+	m.acfRequests.Store(0)
+	m.acfFailures.Store(0)
 	m.ukRequests.Store(0)
 	m.ukFailures.Store(0)
+	m.aplRequests.Store(0)
+	m.aplFailures.Store(0)
 	
 	// Reset performance metrics
 	m.avgResponseTime.Store(0)
@@ -859,8 +867,12 @@ func (p *edgeProxy) incrementOriginRequest(target *upstreamTarget) {
 		p.metrics.svRequests.Add(1)
 	case p.isSUTarget(target):
 		p.metrics.suRequests.Add(1)
+	case p.isACFTarget(target):
+		p.metrics.acfRequests.Add(1)
 	case target == p.ukTarget:
 		p.metrics.ukRequests.Add(1)
+	case target == p.aplTarget:
+		p.metrics.aplRequests.Add(1)
 	}
 }
 
@@ -879,8 +891,12 @@ func (p *edgeProxy) incrementOriginFailure(target *upstreamTarget) {
 		p.metrics.svFailures.Add(1)
 	case p.isSUTarget(target):
 		p.metrics.suFailures.Add(1)
+	case p.isACFTarget(target):
+		p.metrics.acfFailures.Add(1)
 	case target == p.ukTarget:
 		p.metrics.ukFailures.Add(1)
+	case target == p.aplTarget:
+		p.metrics.aplFailures.Add(1)
 	}
 }
 
@@ -905,6 +921,15 @@ func (p *edgeProxy) isSVTarget(target *upstreamTarget) bool {
 
 func (p *edgeProxy) isSUTarget(target *upstreamTarget) bool {
 	for _, t := range p.suTargets {
+		if t == target {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *edgeProxy) isACFTarget(target *upstreamTarget) bool {
+	for _, t := range p.acfTargets {
 		if t == target {
 			return true
 		}
@@ -964,10 +989,20 @@ func (m *metrics) getSnapshot() MetricsSnapshot {
 			Failures:    m.suFailures.Load(),
 			FailureRate: calculateFailureRate(m.suRequests.Load(), m.suFailures.Load()),
 		},
+		"acf": {
+			Requests:    m.acfRequests.Load(),
+			Failures:    m.acfFailures.Load(),
+			FailureRate: calculateFailureRate(m.acfRequests.Load(), m.acfFailures.Load()),
+		},
 		"uk": {
 			Requests:    m.ukRequests.Load(),
 			Failures:    m.ukFailures.Load(),
 			FailureRate: calculateFailureRate(m.ukRequests.Load(), m.ukFailures.Load()),
+		},
+		"apl": {
+			Requests:    m.aplRequests.Load(),
+			Failures:    m.aplFailures.Load(),
+			FailureRate: calculateFailureRate(m.aplRequests.Load(), m.aplFailures.Load()),
 		},
 	}
 
