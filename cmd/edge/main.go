@@ -1342,9 +1342,6 @@ func (p *edgeProxy) schedulePrefetch(target *upstreamTarget, playlistPath string
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if !strings.Contains(line, ".ts") {
-			continue
-		}
 
 		segRef, err := url.Parse(line)
 		if err != nil {
@@ -1355,6 +1352,10 @@ func (p *edgeProxy) schedulePrefetch(target *upstreamTarget, playlistPath string
 		}
 
 		segURL := playlistURL.ResolveReference(segRef)
+		if !isSegmentPath(segURL.Path) {
+			continue
+		}
+
 		key := cacheKeyForURL(segURL)
 		if p.cacheContains(key) {
 			continue
@@ -1440,6 +1441,7 @@ func cacheKeyForURL(u *url.URL) string {
 	clone := *u
 	clone.User = nil
 	clone.Fragment = ""
+	clone.RawQuery = ""
 	return clone.String()
 }
 
@@ -1651,7 +1653,8 @@ func isPlaylistPath(path string) bool {
 }
 
 func isSegmentPath(path string) bool {
-	return strings.HasSuffix(strings.ToLower(path), ".ts")
+	lower := strings.ToLower(path)
+	return strings.HasSuffix(lower, ".ts") || strings.HasSuffix(lower, ".mp4")
 }
 
 func shouldCache(status int) bool {
