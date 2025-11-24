@@ -1343,7 +1343,9 @@ func (p *edgeProxy) startDailyMetricsReset(resetTime string) {
 func (p *edgeProxy) applyCacheHeaders(header http.Header, path string) {
 	switch {
 	case isPlaylistPath(path):
-		header.Set("Cache-Control", "public, max-age=1, must-revalidate, stale-while-revalidate=1")
+		header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		header.Set("Pragma", "no-cache")
+		header.Set("Expires", "0")
 	case isSegmentPath(path):
 		header.Set("Cache-Control", "public, max-age=10")
 	}
