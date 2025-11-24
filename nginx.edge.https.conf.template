@@ -1,0 +1,106 @@
+upstream edge_go_backend {
+    server edge-go:9000;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name _;
+
+    ssl_certificate /etc/nginx/keys/server.crt;
+    ssl_certificate_key /etc/nginx/keys/server.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    proxy_connect_timeout 3s;
+    proxy_send_timeout 10s;
+    proxy_read_timeout 10s;
+    send_timeout 10s;
+
+    location /up {
+        access_log off;
+        return 200 "OK\n";
+        add_header Content-Type text/plain;
+    }
+
+    location ~ ^/apl/.*\.(m3u8|ts)$ {
+        proxy_pass http://edge_go_backend;
+        proxy_buffering off;
+    }
+
+    location /apl/ {
+        return 403;
+    }
+
+    location / {
+        proxy_pass http://edge_go_backend;
+        proxy_buffering off;
+    }
+
+    error_log /dev/stderr warn;
+    access_log /dev/stdout;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name apl.example.com; # replace with the /apl domain
+
+    ssl_certificate /etc/nginx/keys/apl.crt; # cert for apl domain
+    ssl_certificate_key /etc/nginx/keys/apl.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    proxy_connect_timeout 3s;
+    proxy_send_timeout 10s;
+    proxy_read_timeout 10s;
+    send_timeout 10s;
+
+    location /up {
+        access_log off;
+        return 200 "OK\n";
+        add_header Content-Type text/plain;
+    }
+
+    location ~ ^/apl/.*\.(m3u8|ts)$ {
+        proxy_pass http://edge_go_backend;
+        proxy_buffering off;
+        add_header X-Go-Through "nginx-edge" always;
+    }
+
+    location /apl/ {
+        return 403;
+    }
+
+    location / {
+        proxy_pass http://edge_go_backend;
+        proxy_buffering off;
+        add_header X-Go-Through "nginx-edge" always;
+    }
+
+    error_log /dev/stderr warn;
+    access_log /dev/stdout;
+}

@@ -25,3 +25,6 @@ tmp/
 # Temporary files
 *.tmp
 *.temp
+
+# SSL keys (not committed)
+keys/

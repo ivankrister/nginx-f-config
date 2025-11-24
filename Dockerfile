@@ -1,3 +1,9 @@
 FROM nginx:alpine
 
-COPY nginx.edge.http.conf.template /etc/nginx/conf.d/default.conf
+COPY nginx.edge.http.conf.template /etc/nginx/templates/nginx.edge.http.conf.template
+COPY nginx.edge.https.conf.template /etc/nginx/templates/nginx.edge.https.conf.template
+COPY entrypoint.sh /entrypoint.sh
+
+RUN chmod +x /entrypoint.sh
+
+CMD ["/entrypoint.sh"]

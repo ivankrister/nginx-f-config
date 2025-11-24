@@ -82,6 +82,11 @@ services:
     container_name: nginx-live
     depends_on:
       - edge-go
+    environment:
+      - SSL_ENABLE=${SSL_ENABLE:-true}
     ports:
       - "8080:80"
+      - "443:443"
+    volumes:
+      - ./keys:/etc/nginx/keys:ro
     restart: unless-stopped
