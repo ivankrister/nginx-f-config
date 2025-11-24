@@ -26,7 +26,7 @@ server {
         add_header Content-Type text/plain;
     }
 
-    location ~ ^/(.*\.(m3u8|ts))$ {
+    location /(.*\.(m3u8|ts))$ {
         proxy_pass http://edge_go_backend/apl/stream/streams/$1;
         proxy_buffering off;
     }

@@ -56,6 +56,8 @@ type metrics struct {
 	suFailures    atomic.Uint64
 	acfRequests   atomic.Uint64
 	acfFailures   atomic.Uint64
+	wccRequests   atomic.Uint64
+	wccFailures   atomic.Uint64
 	ukRequests    atomic.Uint64
 	ukFailures    atomic.Uint64
 	aplRequests   atomic.Uint64
@@ -151,6 +153,8 @@ func (m *metrics) reset() {
 	m.suFailures.Store(0)
 	m.acfRequests.Store(0)
 	m.acfFailures.Store(0)
+	m.wccRequests.Store(0)
+	m.wccFailures.Store(0)
 	m.ukRequests.Store(0)
 	m.ukFailures.Store(0)
 	m.aplRequests.Store(0)
@@ -202,7 +206,7 @@ func main() {
 		proxy.startDailyMetricsReset(cfg.MetricsResetTime)
 	}
 
-	log.Printf("edge proxy listening on %s (oryx=%v, perya=%s, sv=%v, su=%v, acf=%v, uk=%s)", cfg.ListenAddr, cfg.OryxOrigins, cfg.PeryaOrigin, listOriginNames(cfg.SVNamedOrigins), listOriginNames(cfg.SUOrigins), listOriginNames(cfg.ACFOrigins), cfg.UKOrigin)
+	log.Printf("edge proxy listening on %s (oryx=%v, perya=%s, sv=%v, su=%v, acf=%v, wcc=%s, uk=%s)", cfg.ListenAddr, cfg.OryxOrigins, cfg.PeryaOrigin, listOriginNames(cfg.SVNamedOrigins), listOriginNames(cfg.SUOrigins), listOriginNames(cfg.ACFOrigins), cfg.WCCOrigin, cfg.UKOrigin)
 	log.Printf("metrics endpoint available at %s/metrics", cfg.ListenAddr)
 	log.Printf("dashboard available at %s/dashboard", cfg.ListenAddr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -225,6 +229,10 @@ type config struct {
 	ACFOrigins         map[string]originConfig
 	ACFReferer         string
 	APLOrigin          string
+	WCCOrigin          string
+	WCCHost            string
+	WCCReferer         string
+	WCCSkipTLSVerify   bool
 	UKOrigin           string
 	UKHost             string
 	UKReferer          string
@@ -306,6 +314,16 @@ func loadConfig() (*config, error) {
 	acfReferer := strings.TrimSpace(os.Getenv("ACF_REFERER"))
 	acfOrigins := collectACFOriginsWithDefault(acfReferer)
 	aplOrigin := strings.TrimSpace(os.Getenv("APL_ORIGIN"))
+	wccOrigin := strings.TrimSpace(os.Getenv("WCC_ORIGIN"))
+	wccHost := strings.TrimSpace(os.Getenv("WCC_HOST_HEADER"))
+	wccReferer := strings.TrimSpace(os.Getenv("WCC_REFERER"))
+	if wccReferer == "" {
+		wccReferer = "https://stream.wccgames7.xyz/"
+	}
+	wccSkipVerify, err := parseBoolEnv("WCC_SKIP_TLS_VERIFY", true)
+	if err != nil {
+		return nil, err
+	}
 	ukOrigin := strings.TrimSpace(os.Getenv("UK_ORIGIN"))
 	ukHost := strings.TrimSpace(os.Getenv("UK_HOST_HEADER"))
 	ukReferer := strings.TrimSpace(os.Getenv("UK_REFERER"))
@@ -398,6 +416,10 @@ func loadConfig() (*config, error) {
 		ACFOrigins:         acfOrigins,
 		ACFReferer:         acfReferer,
 		APLOrigin:          aplOrigin,
+		WCCOrigin:          wccOrigin,
+		WCCHost:            wccHost,
+		WCCReferer:         wccReferer,
+		WCCSkipTLSVerify:   wccSkipVerify,
 		UKOrigin:           ukOrigin,
 		UKHost:             ukHost,
 		UKReferer:          ukReferer,
@@ -477,6 +499,7 @@ type edgeProxy struct {
 	acfTargets     map[string]*upstreamTarget
 	acfPrefixes    []string
 	aplTarget      *upstreamTarget
+	wccTarget      *upstreamTarget
 	ukTarget       *upstreamTarget
 	primeOrigin    string
 	primeReferer   string
@@ -621,6 +644,15 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 		aplTarget = buildTarget(aplURL, "", "", "", false)
 	}
 
+	var wccTarget *upstreamTarget
+	if cfg.WCCOrigin != "" {
+		wccURL, err := buildURL(cfg.WCCOrigin)
+		if err != nil {
+			return nil, fmt.Errorf("invalid WCC origin: %w", err)
+		}
+		wccTarget = buildTarget(wccURL, cfg.WCCHost, "", cfg.WCCReferer, cfg.WCCSkipTLSVerify)
+	}
+
 	var ukTarget *upstreamTarget
 	if cfg.UKOrigin != "" {
 		ukURL, err := buildURL(cfg.UKOrigin)
@@ -678,6 +710,7 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 		acfTargets:     acfTargets,
 		acfPrefixes:    acfPrefixes,
 		aplTarget:      aplTarget,
+		wccTarget:      wccTarget,
 		ukTarget:       ukTarget,
 		primeOrigin:    cfg.PrimeOrigin,
 		primeReferer:   cfg.PrimeReferer,
@@ -875,6 +908,8 @@ func (p *edgeProxy) incrementOriginRequest(target *upstreamTarget) {
 		p.metrics.suRequests.Add(1)
 	case p.isACFTarget(target):
 		p.metrics.acfRequests.Add(1)
+	case target == p.wccTarget:
+		p.metrics.wccRequests.Add(1)
 	case target == p.ukTarget:
 		p.metrics.ukRequests.Add(1)
 	case target == p.aplTarget:
@@ -899,6 +934,8 @@ func (p *edgeProxy) incrementOriginFailure(target *upstreamTarget) {
 		p.metrics.suFailures.Add(1)
 	case p.isACFTarget(target):
 		p.metrics.acfFailures.Add(1)
+	case target == p.wccTarget:
+		p.metrics.wccFailures.Add(1)
 	case target == p.ukTarget:
 		p.metrics.ukFailures.Add(1)
 	case target == p.aplTarget:
@@ -999,6 +1036,11 @@ func (m *metrics) getSnapshot() MetricsSnapshot {
 			Requests:    m.acfRequests.Load(),
 			Failures:    m.acfFailures.Load(),
 			FailureRate: calculateFailureRate(m.acfRequests.Load(), m.acfFailures.Load()),
+		},
+		"wcc": {
+			Requests:    m.wccRequests.Load(),
+			Failures:    m.wccFailures.Load(),
+			FailureRate: calculateFailureRate(m.wccRequests.Load(), m.wccFailures.Load()),
 		},
 		"uk": {
 			Requests:    m.ukRequests.Load(),
@@ -1287,6 +1329,16 @@ func (p *edgeProxy) selectUpstream(path string) (*upstreamTarget, string, error)
 			return target, trimmed, nil
 		}
 		return nil, "", errors.New("ACF origin not configured")
+	case strings.HasPrefix(path, "/__prefetch/wcc"):
+		if p.wccTarget == nil {
+			return nil, "", errors.New("WCC origin not configured")
+		}
+		return p.wccTarget, trimPrefix(path, "/__prefetch/wcc"), nil
+	case strings.HasPrefix(path, "/wcc"):
+		if p.wccTarget == nil {
+			return nil, "", errors.New("WCC origin not configured")
+		}
+		return p.wccTarget, trimPrefix(path, "/wcc"), nil
 	case strings.HasPrefix(path, "/__prefetch/uk"):
 		if p.ukTarget == nil {
 			return nil, "", errors.New("UK origin not configured")

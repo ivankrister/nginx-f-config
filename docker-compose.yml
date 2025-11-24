@@ -69,6 +69,10 @@ services:
       - ACF_REFERER6=${ACF_REFERER6}
       - ACF_REFERER=${ACF_REFERER}
       - APL_ORIGIN=${APL_ORIGIN}
+      - WCC_ORIGIN=${WCC_ORIGIN}
+      - WCC_HOST_HEADER=${WCC_HOST_HEADER}
+      - WCC_REFERER=${WCC_REFERER:-https://stream.wccgames7.xyz/}
+      - WCC_SKIP_TLS_VERIFY=${WCC_SKIP_TLS_VERIFY:-true}
       - METRICS_RESET_DAILY=${METRICS_RESET_DAILY:-true}
       - METRICS_RESET_TIME=${METRICS_RESET_TIME:-00:00}
     ports:
@@ -88,7 +92,7 @@ services:
       - NGINX_SERVER_APL=${NGINX_SERVER_APL:-apl.example.com}
     ports:
       - "8080:80"
-      - "443:443"
+      - "8443:443"
     volumes:
       - ./keys:/etc/nginx/keys:ro
     restart: unless-stopped
