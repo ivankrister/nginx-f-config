@@ -233,6 +233,8 @@ type config struct {
 	WCCHost            string
 	WCCReferer         string
 	WCCSkipTLSVerify   bool
+	WCCPlaylistTTL     time.Duration
+	WCCPlaylistGrace   time.Duration
 	UKOrigin           string
 	UKHost             string
 	UKReferer          string
@@ -246,6 +248,7 @@ type config struct {
 	CacheEntries       int
 	PlaylistTTL        time.Duration
 	SegmentTTL         time.Duration
+	PlaylistGrace      time.Duration
 	PrefetchWorkers    int
 	PrefetchBatch      int
 	PrefetchEnabled    bool
@@ -361,6 +364,45 @@ func loadConfig() (*config, error) {
 		return nil, err
 	}
 
+	wccPlaylistTTL := playlistTTL
+	playlistGrace := time.Duration(0)
+	if raw := strings.TrimSpace(os.Getenv("CACHE_FLEXIBLE")); raw != "" {
+		parts := strings.Split(raw, ",")
+		if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
+			sec, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+			if err != nil || sec <= 0 {
+				return nil, fmt.Errorf("invalid CACHE_FLEXIBLE primary ttl: %w", err)
+			}
+			playlistTTL = time.Duration(sec) * time.Second
+		}
+		if len(parts) > 1 && strings.TrimSpace(parts[1]) != "" {
+			sec, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+			if err != nil || sec < 0 {
+				return nil, fmt.Errorf("invalid CACHE_FLEXIBLE grace ttl: %w", err)
+			}
+			playlistGrace = time.Duration(sec) * time.Second
+		}
+	}
+
+	wccPlaylistGrace := playlistGrace
+	if raw := strings.TrimSpace(os.Getenv("WCC_CACHE_FLEXIBLE")); raw != "" {
+		parts := strings.Split(raw, ",")
+		if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
+			sec, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+			if err != nil || sec <= 0 {
+				return nil, fmt.Errorf("invalid WCC_CACHE_FLEXIBLE primary ttl: %w", err)
+			}
+			wccPlaylistTTL = time.Duration(sec) * time.Second
+		}
+		if len(parts) > 1 && strings.TrimSpace(parts[1]) != "" {
+			sec, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+			if err != nil || sec < 0 {
+				return nil, fmt.Errorf("invalid WCC_CACHE_FLEXIBLE grace ttl: %w", err)
+			}
+			wccPlaylistGrace = time.Duration(sec) * time.Second
+		}
+	}
+
 	segmentTTL, err := parseDurationEnv("CACHE_TTL_SEGMENT", 30*time.Second)
 	if err != nil {
 		return nil, err
@@ -432,6 +474,9 @@ func loadConfig() (*config, error) {
 		UpstreamUserAgent:  getenv("EDGE_USER_AGENT", defaultUserAgent),
 		CacheEntries:       cacheEntries,
 		PlaylistTTL:        playlistTTL,
+		PlaylistGrace:      playlistGrace,
+		WCCPlaylistTTL:     wccPlaylistTTL,
+		WCCPlaylistGrace:   wccPlaylistGrace,
 		SegmentTTL:         segmentTTL,
 		PrefetchWorkers:    prefetchWorkers,
 		PrefetchBatch:      prefetchBatch,
@@ -486,33 +531,37 @@ func parseBoolEnv(key string, def bool) (bool, error) {
 const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
 type edgeProxy struct {
-	clientStrict   *http.Client
-	clientInsecure *http.Client
-	oryxTargets    []*upstreamTarget
-	oryxNamed      map[string]*upstreamTarget
-	oryxPrefixes   []string
-	peryaTarget    *upstreamTarget
-	svTargets      map[string]*upstreamTarget
-	svPrefixes     []string
-	suTargets      map[string]*upstreamTarget
-	suPrefixes     []string
-	acfTargets     map[string]*upstreamTarget
-	acfPrefixes    []string
-	aplTarget      *upstreamTarget
-	wccTarget      *upstreamTarget
-	ukTarget       *upstreamTarget
-	primeOrigin    string
-	primeReferer   string
-	userAgent      string
-	oryxCounter    atomic.Uint64
-	upstreamDelay  time.Duration
-	cache          *ristretto.Cache
-	playlistTTL    time.Duration
-	segmentTTL     time.Duration
-	prefetchBatch  int
-	prefetchSem    chan struct{}
-	prefetchOn     bool
-	metrics        *metrics
+	clientStrict     *http.Client
+	clientInsecure   *http.Client
+	oryxTargets      []*upstreamTarget
+	oryxNamed        map[string]*upstreamTarget
+	oryxPrefixes     []string
+	peryaTarget      *upstreamTarget
+	svTargets        map[string]*upstreamTarget
+	svPrefixes       []string
+	suTargets        map[string]*upstreamTarget
+	suPrefixes       []string
+	acfTargets       map[string]*upstreamTarget
+	acfPrefixes      []string
+	aplTarget        *upstreamTarget
+	wccTarget        *upstreamTarget
+	ukTarget         *upstreamTarget
+	primeOrigin      string
+	primeReferer     string
+	userAgent        string
+	oryxCounter      atomic.Uint64
+	upstreamDelay    time.Duration
+	cache            *ristretto.Cache
+	playlistTTL      time.Duration
+	playlistGrace    time.Duration
+	wccPlaylistTTL   time.Duration
+	wccPlaylistGrace time.Duration
+	segmentTTL       time.Duration
+	prefetchBatch    int
+	prefetchSem      chan struct{}
+	prefetchOn       bool
+	metrics          *metrics
+	revalidateMap    sync.Map
 }
 
 func newEdgeProxy(cfg *config) (*edgeProxy, error) {
@@ -697,32 +746,35 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 	}
 
 	return &edgeProxy{
-		clientStrict:   clientStrict,
-		clientInsecure: clientInsecure,
-		oryxTargets:    oryxTargets,
-		oryxNamed:      oryxNamed,
-		oryxPrefixes:   oryxPrefixes,
-		peryaTarget:    peryaTarget,
-		svTargets:      svTargets,
-		svPrefixes:     svPrefixes,
-		suTargets:      suTargets,
-		suPrefixes:     suPrefixes,
-		acfTargets:     acfTargets,
-		acfPrefixes:    acfPrefixes,
-		aplTarget:      aplTarget,
-		wccTarget:      wccTarget,
-		ukTarget:       ukTarget,
-		primeOrigin:    cfg.PrimeOrigin,
-		primeReferer:   cfg.PrimeReferer,
-		userAgent:      cfg.UpstreamUserAgent,
-		upstreamDelay:  cfg.UpstreamTimeout,
-		cache:          cache,
-		playlistTTL:    cfg.PlaylistTTL,
-		segmentTTL:     cfg.SegmentTTL,
-		prefetchBatch:  cfg.PrefetchBatch,
-		prefetchSem:    prefetchSem,
-		prefetchOn:     cfg.PrefetchEnabled && cfg.PrefetchWorkers > 0 && cfg.PrefetchBatch > 0,
-		metrics:        newMetrics(),
+		clientStrict:     clientStrict,
+		clientInsecure:   clientInsecure,
+		oryxTargets:      oryxTargets,
+		oryxNamed:        oryxNamed,
+		oryxPrefixes:     oryxPrefixes,
+		peryaTarget:      peryaTarget,
+		svTargets:        svTargets,
+		svPrefixes:       svPrefixes,
+		suTargets:        suTargets,
+		suPrefixes:       suPrefixes,
+		acfTargets:       acfTargets,
+		acfPrefixes:      acfPrefixes,
+		aplTarget:        aplTarget,
+		wccTarget:        wccTarget,
+		ukTarget:         ukTarget,
+		primeOrigin:      cfg.PrimeOrigin,
+		primeReferer:     cfg.PrimeReferer,
+		userAgent:        cfg.UpstreamUserAgent,
+		upstreamDelay:    cfg.UpstreamTimeout,
+		cache:            cache,
+		playlistTTL:      cfg.PlaylistTTL,
+		playlistGrace:    cfg.PlaylistGrace,
+		wccPlaylistTTL:   cfg.WCCPlaylistTTL,
+		wccPlaylistGrace: cfg.WCCPlaylistGrace,
+		segmentTTL:       cfg.SegmentTTL,
+		prefetchBatch:    cfg.PrefetchBatch,
+		prefetchSem:      prefetchSem,
+		prefetchOn:       cfg.PrefetchEnabled && cfg.PrefetchWorkers > 0 && cfg.PrefetchBatch > 0,
+		metrics:          newMetrics(),
 	}, nil
 }
 
@@ -747,9 +799,14 @@ func (p *edgeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reqURL := buildRequestURL(target.base, upstreamPath, r.URL.RawQuery)
 	cacheKey := cacheKeyForURL(&reqURL)
 
-	if entry, prefetched, ok := p.getFromCache(cacheKey); ok {
+	if entry, prefetched, ok, stale := p.getFromCache(cacheKey); ok {
 		p.metrics.cacheHits.Add(1)
-		p.writeResponse(w, entry.header, entry.status, entry.body, "HIT", boolToPrefetch(prefetched))
+		cacheMark := "HIT"
+		if stale {
+			cacheMark = "STALE"
+			p.scheduleRevalidate(target, &reqURL)
+		}
+		p.writeResponse(w, entry.header, entry.status, entry.body, cacheMark, boolToPrefetch(prefetched))
 		p.updateResponseTime(start)
 		return
 	}
@@ -775,13 +832,13 @@ func (p *edgeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *edgeProxy) fetchAndStore(ctx context.Context, reqURL *url.URL, target *upstreamTarget, prefetched bool) (*cachedResponse, error) {
 	resp, err := p.fetchFromOrigin(ctx, reqURL, target)
 	if err != nil {
-		// Serve stale playlist on error if available.
-		if isPlaylistPath(reqURL.Path) {
-			if cached, prefetchedEntry, ok := p.getFromCache(cacheKeyForURL(reqURL)); ok {
+		// Serve stale playlist/segment on error if available.
+		if isPlaylistPath(reqURL.Path) || isSegmentPath(reqURL.Path) {
+			if cached, prefetchedEntry, ok, _ := p.getFromCache(cacheKeyForURL(reqURL)); ok {
 				header := cloneHeader(cached.header)
 				header.Set("X-Go-Cache", "STALE")
 				header.Set("X-Go-Prefetch", boolToPrefetch(prefetchedEntry))
-				header.Set("X-Go-Fallback", "playlist-stale-error")
+				header.Set("X-Go-Fallback", "stale-error")
 				return &cachedResponse{status: cached.status, header: header, body: cached.body}, nil
 			}
 		}
@@ -799,7 +856,7 @@ func (p *edgeProxy) fetchAndStore(ctx context.Context, reqURL *url.URL, target *
 
 		// Serve stale cache if retry also hit 525 (prevents visible errors).
 		if resp != nil && resp.status == 525 {
-			if cached, prefetchedEntry, ok := p.getFromCache(cacheKeyForURL(reqURL)); ok {
+			if cached, prefetchedEntry, ok, _ := p.getFromCache(cacheKeyForURL(reqURL)); ok {
 				header := cloneHeader(cached.header)
 				header.Set("X-Go-Cache", "STALE")
 				header.Set("X-Go-Prefetch", boolToPrefetch(prefetchedEntry))
@@ -809,18 +866,29 @@ func (p *edgeProxy) fetchAndStore(ctx context.Context, reqURL *url.URL, target *
 		}
 	}
 
-	// Serve stale playlist on 5xx responses if available.
-	if isPlaylistPath(reqURL.Path) && resp != nil && resp.status >= 500 {
-		if cached, prefetchedEntry, ok := p.getFromCache(cacheKeyForURL(reqURL)); ok {
+	// Serve stale playlist/segment on 5xx responses if available.
+	if (isPlaylistPath(reqURL.Path) || isSegmentPath(reqURL.Path)) && resp != nil && resp.status >= 500 {
+		if cached, prefetchedEntry, ok, _ := p.getFromCache(cacheKeyForURL(reqURL)); ok {
 			header := cloneHeader(cached.header)
 			header.Set("X-Go-Cache", "STALE")
 			header.Set("X-Go-Prefetch", boolToPrefetch(prefetchedEntry))
-			header.Set("X-Go-Fallback", "playlist-stale-5xx")
+			header.Set("X-Go-Fallback", "stale-5xx")
 			return &cachedResponse{status: cached.status, header: header, body: cached.body}, nil
 		}
 	}
 
-	p.storeCacheEntry(reqURL, resp, prefetched)
+	ttl := p.ttlForPath(reqURL.Path)
+	grace := time.Duration(0)
+	if isPlaylistPath(reqURL.Path) {
+		ttl = p.playlistTTL
+		grace = p.playlistGrace
+		if target == p.wccTarget {
+			ttl = p.wccPlaylistTTL
+			grace = p.wccPlaylistGrace
+		}
+	}
+
+	p.storeCacheEntry(reqURL, resp, prefetched, ttl, grace)
 	return resp, nil
 }
 
@@ -874,28 +942,40 @@ func (p *edgeProxy) fetchFromOrigin(ctx context.Context, reqURL *url.URL, target
 	return &cachedResponse{status: resp.StatusCode, header: header, body: body}, nil
 }
 
-func (p *edgeProxy) storeCacheEntry(reqURL *url.URL, resp *cachedResponse, prefetched bool) {
+func (p *edgeProxy) storeCacheEntry(reqURL *url.URL, resp *cachedResponse, prefetched bool, ttl time.Duration, grace time.Duration) {
 	if p.cache == nil || !shouldCache(resp.status) {
 		return
 	}
-	ttl := p.ttlForPath(reqURL.Path)
 	if ttl <= 0 {
 		return
 	}
-	value := &cacheValue{resp: resp, prefetched: prefetched}
-	p.cache.SetWithTTL(cacheKeyForURL(reqURL), value, 1, ttl)
+	storeTTL := ttl
+	if grace > 0 {
+		storeTTL += grace
+	}
+	value := &cacheValue{resp: resp, prefetched: prefetched, storedAt: time.Now(), path: reqURL.Path, ttl: ttl, grace: grace}
+	p.cache.SetWithTTL(cacheKeyForURL(reqURL), value, 1, storeTTL)
 }
 
-func (p *edgeProxy) getFromCache(key string) (*cachedResponse, bool, bool) {
+func (p *edgeProxy) getFromCache(key string) (*cachedResponse, bool, bool, bool) {
 	if p.cache == nil {
-		return nil, false, false
+		return nil, false, false, false
 	}
 	if raw, ok := p.cache.Get(key); ok {
 		if value, valid := raw.(*cacheValue); valid {
-			return value.resp, value.prefetched, true
+			if value.ttl > 0 && value.grace > 0 {
+				age := time.Since(value.storedAt)
+				if age > value.ttl+value.grace {
+					return nil, false, false, false
+				}
+				if age > value.ttl {
+					return value.resp, value.prefetched, true, true
+				}
+			}
+			return value.resp, value.prefetched, true, false
 		}
 	}
-	return nil, false, false
+	return nil, false, false, false
 }
 
 func (p *edgeProxy) cacheContains(key string) bool {
@@ -1499,6 +1579,10 @@ type cachedResponse struct {
 type cacheValue struct {
 	resp       *cachedResponse
 	prefetched bool
+	storedAt   time.Time
+	path       string
+	ttl        time.Duration
+	grace      time.Duration
 }
 
 func (p *edgeProxy) writeResponse(w http.ResponseWriter, header http.Header, status int, body []byte, cacheStatus, prefetchInfo string) {
@@ -1513,6 +1597,24 @@ func (p *edgeProxy) writeResponse(w http.ResponseWriter, header http.Header, sta
 	if _, err := w.Write(body); err != nil {
 		log.Printf("write response error: %v", err)
 	}
+}
+
+func (p *edgeProxy) scheduleRevalidate(target *upstreamTarget, reqURL *url.URL) {
+	if target == nil || target.base == nil {
+		return
+	}
+	key := cacheKeyForURL(reqURL)
+	if _, loaded := p.revalidateMap.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		defer p.revalidateMap.Delete(key)
+		ctx, cancel := context.WithTimeout(context.Background(), p.upstreamDelay)
+		defer cancel()
+		if _, err := p.fetchAndStore(ctx, reqURL, target, false); err != nil {
+			log.Printf("revalidate %s failed: %v", reqURL.Redacted(), err)
+		}
+	}()
 }
 
 func sanitizeHeader(src http.Header) http.Header {
@@ -1781,9 +1883,12 @@ var hopByHopHeaders = map[string]bool{
 
 var stripResponseHeaders = map[string]bool{
 	"Alt-Svc":         true,
-	"CF-Cache-Status": true,
-	"CF-Ray":          true,
-	"NEL":             true,
+	"Cf-Cache-Status": true,
+	"Cf-Ray":          true,
+	"Date":            true,
+	"Etag":            true,
+	"Last-Modified":   true,
+	"Nel":             true,
 	"Report-To":       true,
 	"Priority":        true,
 	"Server":          true,
