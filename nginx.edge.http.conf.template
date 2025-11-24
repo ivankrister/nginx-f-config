@@ -26,10 +26,9 @@ server {
         add_header Content-Type text/plain;
     }
 
-    location ~ ^/apl/.*\.(m3u8|ts)$ {
-        proxy_pass http://edge_go_backend;
+    location ~ ^/(.*\.(m3u8|ts))$ {
+        proxy_pass http://edge_go_backend/apl/stream/streams/$1;
         proxy_buffering off;
-        add_header X-Go-Through "nginx-edge" always;
     }
 
     location /apl/ {
@@ -39,7 +38,6 @@ server {
     location / {
         proxy_pass http://edge_go_backend;
         proxy_buffering off;
-        add_header X-Go-Through "nginx-edge" always;
     }
 
     error_log /dev/stderr warn;

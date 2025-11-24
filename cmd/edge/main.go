@@ -1412,7 +1412,7 @@ func (p *edgeProxy) writeResponse(w http.ResponseWriter, header http.Header, sta
 			w.Header().Add(k, v)
 		}
 	}
-	w.Header().Set("X-Go-Cahce", cacheStatus)
+	w.Header().Set("X-Go-Cache", cacheStatus)
 	w.Header().Set("X-Go-Prefetch", prefetchInfo)
 	w.WriteHeader(status)
 	if _, err := w.Write(body); err != nil {
@@ -1430,7 +1430,7 @@ func sanitizeHeader(src http.Header) http.Header {
 			dst.Add(k, v)
 		}
 	}
-	dst.Del("X-Go-Cahce")
+	dst.Del("X-Go-Cache")
 	dst.Del("X-Go-Prefetch")
 	dst.Del("X-Edge-Go")
 	dst.Del("Access-Control-Allow-Origin")
