@@ -1222,7 +1222,7 @@ func (p *edgeProxy) applyCacheHeaders(header http.Header, path string) {
 	case isPlaylistPath(path):
 		header.Set("Cache-Control", "public, max-age=1, must-revalidate, stale-while-revalidate=1")
 	case isSegmentPath(path):
-		header.Set("Cache-Control", "public, max-age=30")
+		header.Set("Cache-Control", "public, max-age=10")
 	}
 }
 
