@@ -12,7 +12,7 @@ server {
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
-    server_name _;
+    server_name $DEFAULT_SERVER_NAMES;
 
     ssl_certificate /etc/nginx/keys/server.crt;
     ssl_certificate_key /etc/nginx/keys/server.key;
@@ -59,7 +59,7 @@ server {
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
-    server_name apl.example.com; # replace with the /apl domain
+    server_name $APL_SERVER_NAMES;
 
     ssl_certificate /etc/nginx/keys/apl.crt; # cert for apl domain
     ssl_certificate_key /etc/nginx/keys/apl.key;
