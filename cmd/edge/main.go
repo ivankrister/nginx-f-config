@@ -775,8 +775,51 @@ func (p *edgeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *edgeProxy) fetchAndStore(ctx context.Context, reqURL *url.URL, target *upstreamTarget, prefetched bool) (*cachedResponse, error) {
 	resp, err := p.fetchFromOrigin(ctx, reqURL, target)
 	if err != nil {
+		// Serve stale playlist on error if available.
+		if isPlaylistPath(reqURL.Path) {
+			if cached, prefetchedEntry, ok := p.getFromCache(cacheKeyForURL(reqURL)); ok {
+				header := cloneHeader(cached.header)
+				header.Set("X-Go-Cache", "STALE")
+				header.Set("X-Go-Prefetch", boolToPrefetch(prefetchedEntry))
+				header.Set("X-Go-Fallback", "playlist-stale-error")
+				return &cachedResponse{status: cached.status, header: header, body: cached.body}, nil
+			}
+		}
 		return nil, err
 	}
+
+	if target == p.wccTarget && resp != nil && resp.status == 525 {
+		// Retry once to smooth over transient TLS issues at the origin.
+		if ctx.Err() == nil {
+			log.Printf("wcc origin returned 525 for %s, retrying once", reqURL.Redacted())
+			if retryResp, retryErr := p.fetchFromOrigin(ctx, reqURL, target); retryErr == nil {
+				resp = retryResp
+			}
+		}
+
+		// Serve stale cache if retry also hit 525 (prevents visible errors).
+		if resp != nil && resp.status == 525 {
+			if cached, prefetchedEntry, ok := p.getFromCache(cacheKeyForURL(reqURL)); ok {
+				header := cloneHeader(cached.header)
+				header.Set("X-Go-Cache", "STALE")
+				header.Set("X-Go-Prefetch", boolToPrefetch(prefetchedEntry))
+				header.Set("X-Go-Fallback", "wcc-stale-cache")
+				return &cachedResponse{status: cached.status, header: header, body: cached.body}, nil
+			}
+		}
+	}
+
+	// Serve stale playlist on 5xx responses if available.
+	if isPlaylistPath(reqURL.Path) && resp != nil && resp.status >= 500 {
+		if cached, prefetchedEntry, ok := p.getFromCache(cacheKeyForURL(reqURL)); ok {
+			header := cloneHeader(cached.header)
+			header.Set("X-Go-Cache", "STALE")
+			header.Set("X-Go-Prefetch", boolToPrefetch(prefetchedEntry))
+			header.Set("X-Go-Fallback", "playlist-stale-5xx")
+			return &cachedResponse{status: cached.status, header: header, body: cached.body}, nil
+		}
+	}
+
 	p.storeCacheEntry(reqURL, resp, prefetched)
 	return resp, nil
 }
@@ -1487,6 +1530,16 @@ func sanitizeHeader(src http.Header) http.Header {
 	dst.Del("X-Go-Prefetch")
 	dst.Del("X-Edge-Go")
 	dst.Del("Access-Control-Allow-Origin")
+	return dst
+}
+
+func cloneHeader(src http.Header) http.Header {
+	dst := make(http.Header, len(src))
+	for k, vv := range src {
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
+	}
 	return dst
 }
 

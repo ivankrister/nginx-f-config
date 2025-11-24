@@ -28,3 +28,4 @@ tmp/
 
 # SSL keys (not committed)
 keys/
+.gocache/
