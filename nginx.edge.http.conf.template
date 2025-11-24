@@ -31,7 +31,11 @@ server {
         proxy_buffering off;
     }
 
-    location /apl/ {
+    location = /apl {
+        return 403;
+    }
+
+    location ^~ /apl/ {
         return 403;
     }
 

@@ -44,7 +44,11 @@ server {
     }
 
 
-    location /apl/ {
+    location = /apl {
+        return 403;
+    }
+
+    location ^~ /apl/ {
         return 403;
     }
     location /dashboard/ {
@@ -87,7 +91,11 @@ server {
         proxy_pass http://edge_go_backend/apl/stream/streams/$1;
         proxy_buffering off;
     }
-    location /apl/ {
+    location = /apl {
+        return 403;
+    }
+
+    location ^~ /apl/ {
         return 403;
     }
     location / {
