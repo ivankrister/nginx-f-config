@@ -1475,7 +1475,8 @@ func (p *edgeProxy) writeResponse(w http.ResponseWriter, header http.Header, sta
 func sanitizeHeader(src http.Header) http.Header {
 	dst := make(http.Header, len(src))
 	for k, vv := range src {
-		if hopByHopHeaders[textproto.CanonicalMIMEHeaderKey(k)] {
+		canonical := textproto.CanonicalMIMEHeaderKey(k)
+		if hopByHopHeaders[canonical] || stripResponseHeaders[canonical] {
 			continue
 		}
 		for _, v := range vv {
@@ -1723,6 +1724,18 @@ var hopByHopHeaders = map[string]bool{
 	"Transfer-Encoding":   true,
 	"Upgrade":             true,
 	"Keep-Alive":          true,
+}
+
+var stripResponseHeaders = map[string]bool{
+	"Alt-Svc":         true,
+	"CF-Cache-Status": true,
+	"CF-Ray":          true,
+	"NEL":             true,
+	"Report-To":       true,
+	"Priority":        true,
+	"Server":          true,
+	"Server-Timing":   true,
+	"Set-Cookie":      true,
 }
 
 func trimPrefix(path, prefix string) string {
