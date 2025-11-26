@@ -1511,28 +1511,35 @@ func (p *edgeProxy) schedulePrefetch(target *upstreamTarget, playlistPath string
 	}
 
 	playlistURL := buildRequestURL(target.base, playlistPath, "")
-	lines := bytes.Split(body, []byte("\n"))
+	return p.schedulePrefetchFromPlaylist(target, &playlistURL, body, true)
+}
+
+func (p *edgeProxy) schedulePrefetchFromPlaylist(target *upstreamTarget, playlistURL *url.URL, body []byte, allowVariantPrefetch bool) int {
+	parsed := parsePlaylistEntries(playlistURL, body)
+	scheduled := p.scheduleSegmentPrefetches(target, parsed.segments)
+	if scheduled >= p.prefetchBatch {
+		return scheduled
+	}
+
+	if allowVariantPrefetch && scheduled == 0 && len(parsed.variants) > 0 {
+		if variant := selectVariantPlaylist(parsed.variants); variant != nil {
+			key := cacheKeyForURL(variant.url)
+			if !p.cacheContains(key) {
+				p.metrics.prefetchScheduled.Add(1)
+				p.spawnPlaylistPrefetch(target, variant.url)
+			}
+		}
+	}
+
+	return scheduled
+}
+
+func (p *edgeProxy) scheduleSegmentPrefetches(target *upstreamTarget, segments []*url.URL) int {
 	scheduled := 0
-
-	for _, rawLine := range lines {
-		line := strings.TrimSpace(string(rawLine))
-		if line == "" || strings.HasPrefix(line, "#") {
+	for _, segURL := range segments {
+		if segURL == nil {
 			continue
 		}
-
-		segRef, err := url.Parse(line)
-		if err != nil {
-			continue
-		}
-		if segRef.IsAbs() && segRef.Host != playlistURL.Host {
-			continue
-		}
-
-		segURL := playlistURL.ResolveReference(segRef)
-		if !isSegmentPath(segURL.Path) {
-			continue
-		}
-
 		key := cacheKeyForURL(segURL)
 		if p.cacheContains(key) {
 			continue
@@ -1545,8 +1552,193 @@ func (p *edgeProxy) schedulePrefetch(target *upstreamTarget, playlistPath string
 			break
 		}
 	}
-
 	return scheduled
+}
+
+func (p *edgeProxy) spawnPlaylistPrefetch(target *upstreamTarget, playlistURL *url.URL) {
+	if p.prefetchSem == nil || target == nil || playlistURL == nil {
+		return
+	}
+
+	p.prefetchSem <- struct{}{}
+	p.metrics.prefetchActive.Add(1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), p.upstreamDelay)
+		defer cancel()
+
+		resp, err := p.fetchAndStore(ctx, playlistURL, target, true)
+		if err != nil {
+			p.metrics.prefetchFailures.Add(1)
+			log.Printf("prefetch playlist %s failed: %v", playlistURL.Redacted(), err)
+			<-p.prefetchSem
+			p.metrics.prefetchActive.Add(-1)
+			return
+		}
+
+		p.metrics.prefetchSuccess.Add(1)
+		<-p.prefetchSem
+		p.metrics.prefetchActive.Add(-1)
+
+		if resp == nil || len(resp.body) == 0 {
+			return
+		}
+
+		p.schedulePrefetchFromPlaylist(target, playlistURL, resp.body, false)
+	}()
+}
+
+type playlistParseResult struct {
+	segments []*url.URL
+	variants []variantPlaylist
+}
+
+type variantPlaylist struct {
+	url       *url.URL
+	bandwidth int
+	order     int
+}
+
+func parsePlaylistEntries(playlistURL *url.URL, body []byte) playlistParseResult {
+	lines := bytes.Split(body, []byte("\n"))
+	result := playlistParseResult{}
+
+	var pendingBandwidth int
+	var hasPendingVariant bool
+	var order int
+
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(string(rawLine))
+		if line == "" {
+			continue
+		}
+
+		if strings.HasPrefix(line, "#") {
+			switch {
+			case strings.HasPrefix(line, "#EXT-X-STREAM-INF"):
+				pendingBandwidth = parseBandwidth(line)
+				hasPendingVariant = true
+			case strings.HasPrefix(line, "#EXT-X-I-FRAME-STREAM-INF"):
+				uri := parseAttribute(line, "URI")
+				if uri == "" {
+					continue
+				}
+				if ref, err := url.Parse(uri); err == nil {
+					resolved := playlistURL.ResolveReference(ref)
+					if ref.Host == "" || ref.Host == playlistURL.Host {
+						result.variants = append(result.variants, variantPlaylist{
+							url:       resolved,
+							bandwidth: parseBandwidth(line),
+							order:     order,
+						})
+						order++
+					}
+				}
+				hasPendingVariant = false
+				pendingBandwidth = 0
+			case strings.HasPrefix(line, "#EXT-X-MEDIA"):
+				uri := parseAttribute(line, "URI")
+				if uri == "" {
+					continue
+				}
+				if ref, err := url.Parse(uri); err == nil {
+					resolved := playlistURL.ResolveReference(ref)
+					if (ref.Host == "" || ref.Host == playlistURL.Host) && isPlaylistPath(resolved.Path) {
+						result.variants = append(result.variants, variantPlaylist{
+							url:       resolved,
+							bandwidth: 0,
+							order:     order,
+						})
+						order++
+					}
+				}
+				hasPendingVariant = false
+				pendingBandwidth = 0
+			}
+			continue
+		}
+
+		ref, err := url.Parse(line)
+		if err != nil {
+			hasPendingVariant = false
+			pendingBandwidth = 0
+			continue
+		}
+
+		resolved := playlistURL.ResolveReference(ref)
+		if ref.Host != "" && ref.Host != playlistURL.Host {
+			hasPendingVariant = false
+			pendingBandwidth = 0
+			continue
+		}
+
+		if isSegmentPath(resolved.Path) {
+			result.segments = append(result.segments, resolved)
+		} else if isPlaylistPath(resolved.Path) {
+			bw := 0
+			if hasPendingVariant {
+				bw = pendingBandwidth
+			}
+			result.variants = append(result.variants, variantPlaylist{
+				url:       resolved,
+				bandwidth: bw,
+				order:     order,
+			})
+			order++
+		}
+
+		hasPendingVariant = false
+		pendingBandwidth = 0
+	}
+
+	return result
+}
+
+func selectVariantPlaylist(variants []variantPlaylist) *variantPlaylist {
+	if len(variants) == 0 {
+		return nil
+	}
+	best := variants[0]
+	for _, candidate := range variants[1:] {
+		if candidate.bandwidth > best.bandwidth {
+			best = candidate
+			continue
+		}
+		if candidate.bandwidth == best.bandwidth && candidate.order < best.order {
+			best = candidate
+		}
+	}
+	return &best
+}
+
+func parseBandwidth(line string) int {
+	raw := parseAttribute(line, "BANDWIDTH")
+	if raw == "" {
+		return 0
+	}
+	bw, err := strconv.Atoi(raw)
+	if err != nil || bw < 0 {
+		return 0
+	}
+	return bw
+}
+
+func parseAttribute(line, key string) string {
+	idx := strings.Index(line, ":")
+	if idx == -1 || idx == len(line)-1 {
+		return ""
+	}
+	attrs := strings.Split(line[idx+1:], ",")
+	for _, attr := range attrs {
+		parts := strings.SplitN(strings.TrimSpace(attr), "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if !strings.EqualFold(parts[0], key) {
+			continue
+		}
+		return strings.Trim(parts[1], `"`)
+	}
+	return ""
 }
 
 func (p *edgeProxy) spawnPrefetch(target *upstreamTarget, segURL *url.URL) {
