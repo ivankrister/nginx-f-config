@@ -97,9 +97,11 @@ services:
       - NGINX_SERVER_DEFAULT=${NGINX_SERVER_DEFAULT:-_}
       - NGINX_SERVER_APL=${NGINX_SERVER_APL:-apl.example.com}
       - AUTO_RELOAD_SSL=${AUTO_RELOAD_SSL:-true}
+      - GENERATE_DHPARAM=${GENERATE_DHPARAM:-true}
+      - DHPARAM_BITS=${DHPARAM_BITS:-2048}
     ports:
       - "8080:80"
       - "8443:443"
     volumes:
-      - ./keys:/etc/nginx/keys:ro
+      - ./keys:/etc/nginx/keys
     restart: unless-stopped
