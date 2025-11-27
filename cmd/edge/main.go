@@ -1380,7 +1380,7 @@ func (p *edgeProxy) forwardHeaders(target *upstreamTarget) map[string]string {
 	if referer == "" {
 		referer = p.primeReferer
 	}
-	return map[string]string{
+	headers := map[string]string{
 		"User-Agent":         p.userAgent,
 		"Origin":             origin,
 		"Referer":            referer,
@@ -1388,6 +1388,13 @@ func (p *edgeProxy) forwardHeaders(target *upstreamTarget) map[string]string {
 		"sec-ch-ua-mobile":   "?0",
 		"sec-ch-ua-platform": `"macOS"`,
 	}
+	if target == p.aplTarget {
+		headers["Cookie"] = "JSESSIONID=853C565B76C69AF5EE8F8BE3D6AC13B0"
+	}
+	if target == p.wccTarget {
+		headers["Cookie"] = "JSESSIONID=E8D7CF0EA66945D405FD2EA87F55E7A7"
+	}
+	return headers
 }
 
 func (p *edgeProxy) selectUpstream(path string) (*upstreamTarget, string, error) {
