@@ -75,6 +75,12 @@ services:
       - WCC_SKIP_TLS_VERIFY=${WCC_SKIP_TLS_VERIFY:-true}
       - METRICS_RESET_DAILY=${METRICS_RESET_DAILY:-true}
       - METRICS_RESET_TIME=${METRICS_RESET_TIME:-00:00}
+      - CERT_STORAGE_DIR=${CERT_STORAGE_DIR:-/app/keys}
+      - CERT_UPLOAD_ENABLED=${CERT_UPLOAD_ENABLED:-true}
+      - CERT_UPLOAD_USER=${CERT_UPLOAD_USER}
+      - CERT_UPLOAD_PASSWORD=${CERT_UPLOAD_PASSWORD}
+    volumes:
+      - ./keys:/app/keys
     ports:
       - "9000:9000"  # Expose metrics endpoint to host
     expose:
@@ -90,6 +96,7 @@ services:
       - SSL_ENABLE=${SSL_ENABLE:-true}
       - NGINX_SERVER_DEFAULT=${NGINX_SERVER_DEFAULT:-_}
       - NGINX_SERVER_APL=${NGINX_SERVER_APL:-apl.example.com}
+      - AUTO_RELOAD_SSL=${AUTO_RELOAD_SSL:-true}
     ports:
       - "8080:80"
       - "8443:443"

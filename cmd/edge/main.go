@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -185,6 +187,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", proxy.ServeMetrics)
 	mux.HandleFunc("/dashboard", proxy.ServeDashboard)
+	mux.HandleFunc("/ssl", proxy.ServeSSLUploadPage)
+	mux.HandleFunc("/ssl/upload", proxy.HandleSSLUpload)
 	mux.HandleFunc("/reset-metrics", proxy.ServeMetricsReset)
 	mux.HandleFunc("/", proxy.ServeHTTP)
 
@@ -254,6 +258,10 @@ type config struct {
 	PrefetchEnabled    bool
 	MetricsResetDaily  bool
 	MetricsResetTime   string // Format: "HH:MM" (e.g., "00:00" for midnight)
+	CertStorageDir     string
+	CertUploadEnabled  bool
+	CertUploadUser     string
+	CertUploadPassword string
 }
 
 type upstreamTarget struct {
@@ -443,6 +451,18 @@ func loadConfig() (*config, error) {
 		return nil, fmt.Errorf("invalid METRICS_RESET_TIME format (use HH:MM): %w", err)
 	}
 
+	certStorageDir := getenv("CERT_STORAGE_DIR", "keys")
+	certUploadEnabled := true
+	if raw := strings.TrimSpace(os.Getenv("CERT_UPLOAD_ENABLED")); raw != "" {
+		val, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CERT_UPLOAD_ENABLED: %w", err)
+		}
+		certUploadEnabled = val
+	}
+	certUploadUser := strings.TrimSpace(os.Getenv("CERT_UPLOAD_USER"))
+	certUploadPass := strings.TrimSpace(os.Getenv("CERT_UPLOAD_PASSWORD"))
+
 	return &config{
 		ListenAddr:         getenv("LISTEN_ADDR", ":9000"),
 		OryxOrigins:        oryxOrigins,
@@ -483,6 +503,10 @@ func loadConfig() (*config, error) {
 		PrefetchEnabled:    prefetchEnabled,
 		MetricsResetDaily:  metricsResetDaily,
 		MetricsResetTime:   metricsResetTime,
+		CertStorageDir:     certStorageDir,
+		CertUploadEnabled:  certUploadEnabled,
+		CertUploadUser:     certUploadUser,
+		CertUploadPassword: certUploadPass,
 	}, nil
 }
 
@@ -531,37 +555,41 @@ func parseBoolEnv(key string, def bool) (bool, error) {
 const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
 type edgeProxy struct {
-	clientStrict     *http.Client
-	clientInsecure   *http.Client
-	oryxTargets      []*upstreamTarget
-	oryxNamed        map[string]*upstreamTarget
-	oryxPrefixes     []string
-	peryaTarget      *upstreamTarget
-	svTargets        map[string]*upstreamTarget
-	svPrefixes       []string
-	suTargets        map[string]*upstreamTarget
-	suPrefixes       []string
-	acfTargets       map[string]*upstreamTarget
-	acfPrefixes      []string
-	aplTarget        *upstreamTarget
-	wccTarget        *upstreamTarget
-	ukTarget         *upstreamTarget
-	primeOrigin      string
-	primeReferer     string
-	userAgent        string
-	oryxCounter      atomic.Uint64
-	upstreamDelay    time.Duration
-	cache            *ristretto.Cache
-	playlistTTL      time.Duration
-	playlistGrace    time.Duration
-	wccPlaylistTTL   time.Duration
-	wccPlaylistGrace time.Duration
-	segmentTTL       time.Duration
-	prefetchBatch    int
-	prefetchSem      chan struct{}
-	prefetchOn       bool
-	metrics          *metrics
-	revalidateMap    sync.Map
+	clientStrict      *http.Client
+	clientInsecure    *http.Client
+	oryxTargets       []*upstreamTarget
+	oryxNamed         map[string]*upstreamTarget
+	oryxPrefixes      []string
+	peryaTarget       *upstreamTarget
+	svTargets         map[string]*upstreamTarget
+	svPrefixes        []string
+	suTargets         map[string]*upstreamTarget
+	suPrefixes        []string
+	acfTargets        map[string]*upstreamTarget
+	acfPrefixes       []string
+	aplTarget         *upstreamTarget
+	wccTarget         *upstreamTarget
+	ukTarget          *upstreamTarget
+	primeOrigin       string
+	primeReferer      string
+	userAgent         string
+	certStorageDir    string
+	certUploadEnabled bool
+	certUploadUser    string
+	certUploadPass    string
+	oryxCounter       atomic.Uint64
+	upstreamDelay     time.Duration
+	cache             *ristretto.Cache
+	playlistTTL       time.Duration
+	playlistGrace     time.Duration
+	wccPlaylistTTL    time.Duration
+	wccPlaylistGrace  time.Duration
+	segmentTTL        time.Duration
+	prefetchBatch     int
+	prefetchSem       chan struct{}
+	prefetchOn        bool
+	metrics           *metrics
+	revalidateMap     sync.Map
 }
 
 func newEdgeProxy(cfg *config) (*edgeProxy, error) {
@@ -746,35 +774,39 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 	}
 
 	return &edgeProxy{
-		clientStrict:     clientStrict,
-		clientInsecure:   clientInsecure,
-		oryxTargets:      oryxTargets,
-		oryxNamed:        oryxNamed,
-		oryxPrefixes:     oryxPrefixes,
-		peryaTarget:      peryaTarget,
-		svTargets:        svTargets,
-		svPrefixes:       svPrefixes,
-		suTargets:        suTargets,
-		suPrefixes:       suPrefixes,
-		acfTargets:       acfTargets,
-		acfPrefixes:      acfPrefixes,
-		aplTarget:        aplTarget,
-		wccTarget:        wccTarget,
-		ukTarget:         ukTarget,
-		primeOrigin:      cfg.PrimeOrigin,
-		primeReferer:     cfg.PrimeReferer,
-		userAgent:        cfg.UpstreamUserAgent,
-		upstreamDelay:    cfg.UpstreamTimeout,
-		cache:            cache,
-		playlistTTL:      cfg.PlaylistTTL,
-		playlistGrace:    cfg.PlaylistGrace,
-		wccPlaylistTTL:   cfg.WCCPlaylistTTL,
-		wccPlaylistGrace: cfg.WCCPlaylistGrace,
-		segmentTTL:       cfg.SegmentTTL,
-		prefetchBatch:    cfg.PrefetchBatch,
-		prefetchSem:      prefetchSem,
-		prefetchOn:       cfg.PrefetchEnabled && cfg.PrefetchWorkers > 0 && cfg.PrefetchBatch > 0,
-		metrics:          newMetrics(),
+		clientStrict:      clientStrict,
+		clientInsecure:    clientInsecure,
+		oryxTargets:       oryxTargets,
+		oryxNamed:         oryxNamed,
+		oryxPrefixes:      oryxPrefixes,
+		peryaTarget:       peryaTarget,
+		svTargets:         svTargets,
+		svPrefixes:        svPrefixes,
+		suTargets:         suTargets,
+		suPrefixes:        suPrefixes,
+		acfTargets:        acfTargets,
+		acfPrefixes:       acfPrefixes,
+		aplTarget:         aplTarget,
+		wccTarget:         wccTarget,
+		ukTarget:          ukTarget,
+		primeOrigin:       cfg.PrimeOrigin,
+		primeReferer:      cfg.PrimeReferer,
+		userAgent:         cfg.UpstreamUserAgent,
+		certStorageDir:    cfg.CertStorageDir,
+		certUploadEnabled: cfg.CertUploadEnabled,
+		certUploadUser:    cfg.CertUploadUser,
+		certUploadPass:    cfg.CertUploadPassword,
+		upstreamDelay:     cfg.UpstreamTimeout,
+		cache:             cache,
+		playlistTTL:       cfg.PlaylistTTL,
+		playlistGrace:     cfg.PlaylistGrace,
+		wccPlaylistTTL:    cfg.WCCPlaylistTTL,
+		wccPlaylistGrace:  cfg.WCCPlaylistGrace,
+		segmentTTL:        cfg.SegmentTTL,
+		prefetchBatch:     cfg.PrefetchBatch,
+		prefetchSem:       prefetchSem,
+		prefetchOn:        cfg.PrefetchEnabled && cfg.PrefetchWorkers > 0 && cfg.PrefetchBatch > 0,
+		metrics:           newMetrics(),
 	}, nil
 }
 
@@ -1251,6 +1283,168 @@ func (p *edgeProxy) ServeDashboard(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write(dashboardHTML); err != nil {
 		log.Printf("error serving dashboard: %v", err)
 	}
+}
+
+type certUploadRequest struct {
+	Target      string `json:"target"`
+	Certificate string `json:"certificate"`
+	PrivateKey  string `json:"privateKey"`
+}
+
+// ServeSSLUploadPage provides a simple UI for pasting certificate and key PEMs
+func (p *edgeProxy) ServeSSLUploadPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !p.authorizeCertUpload(w, r) {
+		return
+	}
+
+	content, err := os.ReadFile("ssl.html")
+	if err != nil {
+		log.Printf("error reading ssl.html: %v", err)
+		http.Error(w, "SSL upload page not available", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+
+	if _, err := w.Write(content); err != nil {
+		log.Printf("error serving ssl upload page: %v", err)
+	}
+}
+
+// HandleSSLUpload accepts certificate/key material and writes it to disk
+func (p *edgeProxy) HandleSSLUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed - use POST", http.StatusMethodNotAllowed)
+		return
+	}
+	if !p.authorizeCertUpload(w, r) {
+		return
+	}
+	defer r.Body.Close()
+
+	var payload certUploadRequest
+	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+			return
+		}
+	} else {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Invalid form payload", http.StatusBadRequest)
+			return
+		}
+		payload.Target = r.FormValue("target")
+		payload.Certificate = r.FormValue("certificate")
+		payload.PrivateKey = r.FormValue("privateKey")
+	}
+
+	payload.Target = strings.ToLower(strings.TrimSpace(payload.Target))
+	if payload.Target == "" {
+		payload.Target = "default"
+	}
+	payload.Certificate = strings.TrimSpace(payload.Certificate)
+	payload.PrivateKey = strings.TrimSpace(payload.PrivateKey)
+
+	if payload.Certificate == "" || payload.PrivateKey == "" {
+		http.Error(w, "Both certificate and private key are required", http.StatusBadRequest)
+		return
+	}
+	if !strings.Contains(payload.Certificate, "BEGIN CERTIFICATE") {
+		http.Error(w, "Certificate must include BEGIN CERTIFICATE", http.StatusBadRequest)
+		return
+	}
+	if !strings.Contains(payload.PrivateKey, "BEGIN") || !strings.Contains(payload.PrivateKey, "PRIVATE KEY") {
+		http.Error(w, "Private key must include BEGIN ... PRIVATE KEY", http.StatusBadRequest)
+		return
+	}
+
+	certPath, keyPath, targetName, err := p.saveCertificate(payload.Target, payload.Certificate, payload.PrivateKey)
+	if err != nil {
+		log.Printf("error saving certificate for %s: %v", targetName, err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := map[string]string{
+		"message":    fmt.Sprintf("Certificate updated for %s", targetName),
+		"cert_path":  certPath,
+		"key_path":   keyPath,
+		"next_steps": "Reload the nginx container or process to apply the new certificate files",
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("error encoding ssl upload response: %v", err)
+	}
+}
+
+func (p *edgeProxy) saveCertificate(target, cert, key string) (string, string, string, error) {
+	certPath, keyPath, targetName, err := p.certPaths(target)
+	if err != nil {
+		return "", "", targetName, err
+	}
+	if err := os.MkdirAll(p.certStorageDir, 0o755); err != nil {
+		return "", "", targetName, fmt.Errorf("failed to prepare certificate directory: %w", err)
+	}
+
+	certPEM := ensureTrailingNewline(cert)
+	keyPEM := ensureTrailingNewline(key)
+
+	if err := writeAtomicFile(certPath, []byte(certPEM), 0o644); err != nil {
+		return "", "", targetName, fmt.Errorf("failed to write certificate: %w", err)
+	}
+	if err := writeAtomicFile(keyPath, []byte(keyPEM), 0o600); err != nil {
+		return "", "", targetName, fmt.Errorf("failed to write key: %w", err)
+	}
+
+	log.Printf("certificate files updated for %s (cert=%s, key=%s)", targetName, certPath, keyPath)
+	return certPath, keyPath, targetName, nil
+}
+
+func (p *edgeProxy) certPaths(target string) (string, string, string, error) {
+	switch target {
+	case "", "default", "server", "primary":
+		return filepath.Join(p.certStorageDir, "server.crt"), filepath.Join(p.certStorageDir, "server.key"), "default", nil
+	case "apl":
+		return filepath.Join(p.certStorageDir, "apl.crt"), filepath.Join(p.certStorageDir, "apl.key"), "apl", nil
+	default:
+		return "", "", target, fmt.Errorf("unsupported certificate target %q", target)
+	}
+}
+
+func ensureTrailingNewline(s string) string {
+	if s == "" {
+		return s
+	}
+	if strings.HasSuffix(s, "\n") {
+		return s
+	}
+	return s + "\n"
+}
+
+func (p *edgeProxy) authorizeCertUpload(w http.ResponseWriter, r *http.Request) bool {
+	if !p.certUploadEnabled {
+		http.NotFound(w, r)
+		return false
+	}
+	if p.certUploadUser == "" && p.certUploadPass == "" {
+		return true
+	}
+	user, pass, ok := r.BasicAuth()
+	if !ok || subtle.ConstantTimeCompare([]byte(user), []byte(p.certUploadUser)) != 1 ||
+		subtle.ConstantTimeCompare([]byte(pass), []byte(p.certUploadPass)) != 1 {
+		w.Header().Set("WWW-Authenticate", `Basic realm="ssl-upload"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
 }
 
 // ServeMetricsReset handles POST requests to reset metrics
@@ -2055,6 +2249,14 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func writeAtomicFile(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func isPlaylistPath(path string) bool {

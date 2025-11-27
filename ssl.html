@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SSL Upload</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: radial-gradient(120% 120% at 10% 20%, #0e1b3c, #0d0f1f 45%, #090b14 100%);
+            --card: rgba(255, 255, 255, 0.04);
+            --border: rgba(255, 255, 255, 0.1);
+            --accent: #7bf5d4;
+            --accent-strong: #54d6b6;
+            --text: #e7ecf3;
+            --muted: #9fb1cc;
+            --danger: #ff8a8a;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background: var(--bg);
+            font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+            color: var(--text);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 32px 16px;
+        }
+        .wrapper {
+            width: min(960px, 100%);
+            background: linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            box-shadow: 0 30px 80px rgba(0,0,0,0.45);
+            padding: 28px;
+            backdrop-filter: blur(14px);
+        }
+        h1 {
+            font-size: 1.6rem;
+            margin: 0 0 6px;
+            letter-spacing: -0.02em;
+        }
+        .lead {
+            margin: 0 0 20px;
+            color: var(--muted);
+            line-height: 1.4;
+        }
+        .grid {
+            display: grid;
+            gap: 18px;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        }
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 16px;
+        }
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: var(--text);
+        }
+        select, textarea {
+            width: 100%;
+            padding: 12px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            color: var(--text);
+            font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+            font-size: 0.95rem;
+            outline: none;
+            transition: border 0.2s ease, box-shadow 0.2s ease;
+        }
+        select:focus, textarea:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(123, 245, 212, 0.2);
+        }
+        textarea {
+            min-height: 180px;
+            resize: vertical;
+            line-height: 1.4;
+        }
+        .actions {
+            margin-top: 18px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        button {
+            padding: 12px 18px;
+            border: none;
+            border-radius: 12px;
+            background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+            color: #03121a;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            cursor: pointer;
+            box-shadow: 0 10px 40px rgba(84, 214, 182, 0.35);
+            transition: transform 0.1s ease, box-shadow 0.1s ease;
+        }
+        button:active { transform: translateY(1px); box-shadow: 0 4px 20px rgba(84, 214, 182, 0.35); }
+        .note {
+            color: var(--muted);
+            font-size: 0.92rem;
+            line-height: 1.5;
+        }
+        .status {
+            padding: 12px 14px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            background: rgba(255,255,255,0.04);
+            min-height: 46px;
+            display: flex;
+            align-items: center;
+            color: var(--muted);
+            font-weight: 500;
+        }
+        .status.success { color: var(--accent); border-color: rgba(123, 245, 212, 0.4); }
+        .status.error { color: var(--danger); border-color: rgba(255,138,138,0.4); }
+        .status strong { color: var(--text); }
+        .footer {
+            margin-top: 12px;
+            color: var(--muted);
+            font-size: 0.88rem;
+        }
+        @media (max-width: 640px) {
+            h1 { font-size: 1.3rem; }
+            .wrapper { padding: 22px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="wrapper">
+        <h1>SSL Certificate Upload</h1>
+        <p class="lead">Paste your PEM-encoded certificate and private key directly in the fields below. We’ll write them to the keys folder used by nginx so you don’t have to SSH into the server.</p>
+
+        <form id="sslForm">
+            <div class="grid">
+                <div class="card">
+                    <label for="target">Certificate target</label>
+                    <select id="target" name="target">
+                        <option value="default">Default server (server.crt/key)</option>
+                        <option value="apl">APL domain (apl.crt/key)</option>
+                    </select>
+                </div>
+                <div class="card">
+                    <label>Quick tips</label>
+                    <p class="note">
+                        Use full PEM blocks including <strong>BEGIN CERTIFICATE</strong> and <strong>BEGIN PRIVATE KEY</strong> lines.
+                        On save, files are written to the shared <code>keys</code> directory (default). Restart or reload nginx to apply.
+                    </p>
+                </div>
+                <div class="card" style="grid-column: 1 / -1;">
+                    <label for="certificate">Certificate (PEM)</label>
+                    <textarea id="certificate" name="certificate" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+                </div>
+                <div class="card" style="grid-column: 1 / -1;">
+                    <label for="privateKey">Private key (PEM)</label>
+                    <textarea id="privateKey" name="privateKey" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+                </div>
+            </div>
+            <div class="actions">
+                <button type="submit">Save certificate</button>
+                <div id="status" class="status">Waiting to upload…</div>
+            </div>
+        </form>
+        <div class="footer">After uploading, reload the nginx container or process to start using the new certificate.</div>
+    </div>
+
+    <script>
+        const form = document.getElementById('sslForm');
+        const statusEl = document.getElementById('status');
+
+        function setStatus(message, tone = '') {
+            statusEl.textContent = message;
+            statusEl.className = `status ${tone}`;
+        }
+
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const payload = {
+                target: form.target.value,
+                certificate: form.certificate.value.trim(),
+                privateKey: form.privateKey.value.trim(),
+            };
+
+            if (!payload.certificate || !payload.privateKey) {
+                setStatus('Paste both the certificate and private key first.', 'error');
+                return;
+            }
+
+            setStatus('Uploading certificate...', '');
+
+            try {
+                const response = await fetch('/ssl/upload', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+
+                const raw = await response.text();
+                let data = {};
+                try { data = raw ? JSON.parse(raw) : {}; } catch { /* ignore */ }
+
+                if (!response.ok) {
+                    const message = data.error || data.message || raw || 'Upload failed';
+                    throw new Error(message);
+                }
+
+                const next = data.next_steps ? ` • ${data.next_steps}` : '';
+                setStatus(`Saved for ${payload.target}. ${data.message || 'Files updated.'}${next}`, 'success');
+            } catch (err) {
+                setStatus(err.message || 'Upload failed', 'error');
+            }
+        });
+    </script>
+</body>
+</html>
