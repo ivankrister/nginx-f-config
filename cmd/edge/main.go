@@ -1712,27 +1712,12 @@ func (p *edgeProxy) schedulePrefetch(target *upstreamTarget, playlistPath string
 	}
 
 	playlistURL := buildRequestURL(target.base, playlistPath, "")
-	return p.schedulePrefetchFromPlaylist(target, &playlistURL, body, true)
+	return p.schedulePrefetchFromPlaylist(target, &playlistURL, body)
 }
 
-func (p *edgeProxy) schedulePrefetchFromPlaylist(target *upstreamTarget, playlistURL *url.URL, body []byte, allowVariantPrefetch bool) int {
+func (p *edgeProxy) schedulePrefetchFromPlaylist(target *upstreamTarget, playlistURL *url.URL, body []byte) int {
 	parsed := parsePlaylistEntries(playlistURL, body)
-	scheduled := p.scheduleSegmentPrefetches(target, parsed.segments)
-	if scheduled >= p.prefetchBatch {
-		return scheduled
-	}
-
-	if allowVariantPrefetch && scheduled == 0 && len(parsed.variants) > 0 {
-		if variant := selectVariantPlaylist(parsed.variants); variant != nil {
-			key := cacheKeyForURL(variant.url)
-			if !p.cacheContains(key) {
-				p.metrics.prefetchScheduled.Add(1)
-				p.spawnPlaylistPrefetch(target, variant.url)
-			}
-		}
-	}
-
-	return scheduled
+	return p.scheduleSegmentPrefetches(target, parsed.segments)
 }
 
 func (p *edgeProxy) scheduleSegmentPrefetches(target *upstreamTarget, segments []*url.URL) int {
@@ -1754,38 +1739,6 @@ func (p *edgeProxy) scheduleSegmentPrefetches(target *upstreamTarget, segments [
 		}
 	}
 	return scheduled
-}
-
-func (p *edgeProxy) spawnPlaylistPrefetch(target *upstreamTarget, playlistURL *url.URL) {
-	if p.prefetchSem == nil || target == nil || playlistURL == nil {
-		return
-	}
-
-	p.prefetchSem <- struct{}{}
-	p.metrics.prefetchActive.Add(1)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), p.upstreamDelay)
-		defer cancel()
-
-		resp, err := p.fetchAndStore(ctx, playlistURL, target, true)
-		if err != nil {
-			p.metrics.prefetchFailures.Add(1)
-			log.Printf("prefetch playlist %s failed: %v", playlistURL.Redacted(), err)
-			<-p.prefetchSem
-			p.metrics.prefetchActive.Add(-1)
-			return
-		}
-
-		p.metrics.prefetchSuccess.Add(1)
-		<-p.prefetchSem
-		p.metrics.prefetchActive.Add(-1)
-
-		if resp == nil || len(resp.body) == 0 {
-			return
-		}
-
-		p.schedulePrefetchFromPlaylist(target, playlistURL, resp.body, false)
-	}()
 }
 
 type playlistParseResult struct {
