@@ -17,8 +17,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM alpine:3.19
 WORKDIR /app
 COPY --from=builder /out/edge /usr/local/bin/edge
-COPY dashboard.html ./dashboard.html
-COPY ssl.html ./ssl.html
+COPY dashboard.html cache.html ssl.html ./
 
 ENV LISTEN_ADDR=":9000"
 EXPOSE 9000

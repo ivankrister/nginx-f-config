@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edge Cache Control</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: radial-gradient(120% 120% at 10% 20%, #0b1f33, #0b1322 48%, #060910 100%);
+            --card: rgba(255, 255, 255, 0.04);
+            --border: rgba(255, 255, 255, 0.08);
+            --glow: rgba(0, 186, 255, 0.4);
+            --accent: #35d0ff;
+            --accent-strong: #0fe3b1;
+            --text: #e5ecf5;
+            --muted: #9bb3c8;
+            --danger: #ff8a8a;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Manrope', 'Segoe UI', sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 28px 14px;
+        }
+        .shell {
+            width: min(1100px, 100%);
+            background: linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 28px;
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45);
+            backdrop-filter: blur(14px);
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            gap: 18px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+        .eyebrow {
+            letter-spacing: 0.24em;
+            text-transform: uppercase;
+            color: var(--muted);
+            font-size: 0.72rem;
+        }
+        h1 {
+            margin: 4px 0 8px;
+            font-size: 1.6rem;
+            letter-spacing: -0.02em;
+        }
+        .lead {
+            margin: 0;
+            color: var(--muted);
+            max-width: 640px;
+            line-height: 1.5;
+        }
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid var(--border);
+            color: var(--text);
+            font-weight: 600;
+        }
+        .pill.good { border-color: rgba(15, 227, 177, 0.6); color: var(--accent-strong); }
+        .pill.warn { border-color: rgba(255, 138, 138, 0.5); color: var(--danger); }
+        .pill.muted { color: var(--muted); }
+        .cta {
+            background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+            color: #041017;
+            border: none;
+            border-radius: 12px;
+            padding: 12px 18px;
+            font-weight: 700;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            box-shadow: 0 12px 40px var(--glow);
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }
+        .cta:active { transform: translateY(1px); box-shadow: 0 6px 20px var(--glow); }
+        .cta:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 16px;
+            margin-top: 12px;
+        }
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 16px;
+        }
+        .card h2 {
+            margin: 0 0 8px;
+            font-size: 1rem;
+            letter-spacing: -0.01em;
+        }
+        .card p { margin: 0; color: var(--muted); }
+        .row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+        label {
+            display: block;
+            font-weight: 700;
+            color: var(--text);
+            margin-bottom: 6px;
+        }
+        input[type="text"], input[type="number"] {
+            width: 100%;
+            padding: 10px 12px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: rgba(255,255,255,0.04);
+            color: var(--text);
+            font-family: 'Manrope', 'Segoe UI', sans-serif;
+            font-size: 0.95rem;
+            outline: none;
+        }
+        input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(53, 208, 255, 0.25);
+        }
+        .small-btn {
+            padding: 10px 14px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: rgba(255,255,255,0.05);
+            color: var(--text);
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .small-btn:hover { border-color: var(--accent); }
+        .small-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 12px;
+            margin-top: 14px;
+        }
+        .metric {
+            padding: 12px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: rgba(255,255,255,0.02);
+        }
+        .metric .label { color: var(--muted); font-size: 0.85rem; }
+        .metric .value { font-size: 1.4rem; font-weight: 700; margin-top: 4px; }
+        .status {
+            margin-top: 10px;
+            padding: 12px 14px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            background: rgba(255,255,255,0.03);
+            color: var(--muted);
+            line-height: 1.5;
+        }
+        .status.success { border-color: rgba(15, 227, 177, 0.5); color: var(--accent-strong); }
+        .status.error { border-color: rgba(255, 138, 138, 0.5); color: var(--danger); }
+        .status.info { color: var(--text); }
+        .meta {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 12px;
+            color: var(--muted);
+        }
+        .meta span { display: inline-flex; align-items: center; gap: 6px; }
+        @media (max-width: 840px) {
+            .grid { grid-template-columns: 1fr; }
+            .header { align-items: flex-start; }
+        }
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <div class="header">
+            <div>
+                <div class="eyebrow">Cache console</div>
+                <h1>Flush the edge cache safely</h1>
+                <p class="lead">Clear all cached playlists and segments without restarting nginx or the Go edge process. We will show you the latest metrics and confirm the flush result.</p>
+            </div>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <button class="cta" id="toggleBtn">Toggle cache</button>
+                <button class="cta" id="clearBtn">
+                    <span>Clear cache</span>
+                </button>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h2>Cache status</h2>
+                <p>Use the button to drop every entry. This action is immediate and affects all active streams.</p>
+                <div class="meta">
+                    <span class="pill muted" id="cacheState">Status unknown</span>
+                    <span class="pill muted" id="lastAction">No actions yet</span>
+                    <span class="pill muted" id="cacheSize">Size: --</span>
+                </div>
+                <div class="status" id="statusBox">Waiting to run a cache clear...</div>
+            </div>
+            <div class="card">
+                <h2>Live metrics</h2>
+                <div class="metrics">
+                    <div class="metric">
+                        <div class="label">Hit ratio</div>
+                        <div class="value" id="hitRatio">--%</div>
+                    </div>
+                    <div class="metric">
+                        <div class="label">Hits</div>
+                        <div class="value" id="hits">--</div>
+                    </div>
+                    <div class="metric">
+                        <div class="label">Misses</div>
+                        <div class="value" id="misses">--</div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <h2>Targeted purge</h2>
+                <p>Purge a single path or a whole prefix without touching the rest of the cache.</p>
+                <div class="row">
+                    <div>
+                        <label for="purgePath">Path or prefix</label>
+                        <input id="purgePath" type="text" placeholder="/ps1/playlist.m3u8">
+                    </div>
+                    <div>
+                        <label>&nbsp;</label>
+                        <button class="small-btn" id="purgeBtn">Purge</button>
+                    </div>
+                </div>
+                <div style="margin-top: 8px;">
+                    <label><input type="checkbox" id="purgePrefix"> Treat as prefix</label>
+                </div>
+            </div>
+            <div class="card">
+                <h2>TTL controls</h2>
+                <p>Adjust cache durations on the fly. Values are in seconds.</p>
+                <div class="row">
+                    <div>
+                        <label for="playlistTTL">Playlist TTL</label>
+                        <input id="playlistTTL" type="number" min="1" step="1" placeholder="2">
+                    </div>
+                    <div>
+                        <label for="playlistGrace">Playlist grace</label>
+                        <input id="playlistGrace" type="number" min="0" step="1" placeholder="0">
+                    </div>
+                    <div>
+                        <label for="segmentTTL">Segment TTL</label>
+                        <input id="segmentTTL" type="number" min="1" step="1" placeholder="10">
+                    </div>
+                </div>
+                <div class="row" style="margin-top: 10px;">
+                    <div>
+                        <label for="wccPlaylistTTL">WCC playlist TTL</label>
+                        <input id="wccPlaylistTTL" type="number" min="1" step="1" placeholder="2">
+                    </div>
+                    <div>
+                        <label for="wccPlaylistGrace">WCC playlist grace</label>
+                        <input id="wccPlaylistGrace" type="number" min="0" step="1" placeholder="0">
+                    </div>
+                    <div style="display: flex; align-items: flex-end;">
+                        <button class="small-btn" id="saveTTLBtn">Save TTLs</button>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <h2>Manual prefetch</h2>
+                <p>Fetch a playlist now and schedule segment prefetches.</p>
+                <div class="row">
+                    <div>
+                        <label for="prefetchPath">Playlist path</label>
+                        <input id="prefetchPath" type="text" placeholder="/ps1/playlist.m3u8">
+                    </div>
+                    <div style="display: flex; align-items: flex-end;">
+                        <button class="small-btn" id="prefetchBtn">Prefetch</button>
+                    </div>
+                </div>
+                <div class="meta" id="prefetchMeta" style="margin-top: 12px;">
+                    <span class="pill muted">Waiting to prefetch</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const statusBox = document.getElementById('statusBox');
+        const cacheState = document.getElementById('cacheState');
+        const lastAction = document.getElementById('lastAction');
+        const cacheSize = document.getElementById('cacheSize');
+        const clearBtn = document.getElementById('clearBtn');
+        const toggleBtn = document.getElementById('toggleBtn');
+        const purgeBtn = document.getElementById('purgeBtn');
+        const saveTTLBtn = document.getElementById('saveTTLBtn');
+        const prefetchBtn = document.getElementById('prefetchBtn');
+        const prefetchMeta = document.getElementById('prefetchMeta');
+
+        const state = { cacheEnabled: null, cacheConfigured: null };
+
+        function setStatus(message, tone = 'info') {
+            statusBox.textContent = message;
+            statusBox.className = `status ${tone}`;
+        }
+
+        function setCacheState(enabled, configured) {
+            state.cacheEnabled = enabled;
+            state.cacheConfigured = configured;
+            cacheState.textContent = configured === false
+                ? 'Cache not configured'
+                : enabled ? 'Cache enabled' : 'Cache disabled';
+            const tone = configured === false ? 'warn' : enabled ? 'good' : 'warn';
+            cacheState.className = `pill ${tone}`;
+            toggleBtn.textContent = enabled ? 'Disable cache' : 'Enable cache';
+            toggleBtn.disabled = configured === false;
+            clearBtn.disabled = configured === false;
+        }
+
+        function setLastAction(message) {
+            lastAction.textContent = message;
+        }
+
+        function formatNumber(num) {
+            if (num === undefined || num === null || Number.isNaN(num)) return '--';
+            if (num < 1000) return num.toString();
+            if (num < 1000000) return (num / 1000).toFixed(1) + 'K';
+            return (num / 1000000).toFixed(1) + 'M';
+        }
+
+        function setCacheSize(size) {
+            cacheSize.textContent = `Size: ${formatNumber(size)}`;
+            cacheSize.className = 'pill muted';
+        }
+
+        async function loadStatus() {
+            try {
+                const response = await fetch('/cache/status');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                setCacheState(data.cache_enabled, data.cache_configured);
+                setCacheSize(data.cache_size);
+                const cfg = data.config || {};
+                document.getElementById('playlistTTL').value = cfg.playlist_ttl_seconds ?? '';
+                document.getElementById('playlistGrace').value = cfg.playlist_grace_seconds ?? '';
+                document.getElementById('segmentTTL').value = cfg.segment_ttl_seconds ?? '';
+                document.getElementById('wccPlaylistTTL').value = cfg.wcc_playlist_ttl_seconds ?? '';
+                document.getElementById('wccPlaylistGrace').value = cfg.wcc_playlist_grace_seconds ?? '';
+            } catch (err) {
+                setStatus('Unable to load cache status.', 'error');
+            }
+        }
+
+        async function loadMetrics() {
+            try {
+                const response = await fetch('/metrics');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+
+                document.getElementById('hitRatio').textContent = `${(data.cache_hit_ratio || 0).toFixed(1)}%`;
+                document.getElementById('hits').textContent = formatNumber(data.cache_hits || 0);
+                document.getElementById('misses').textContent = formatNumber(data.cache_misses || 0);
+            } catch (err) {
+                setStatus('Unable to load metrics. The edge process may be unreachable.', 'error');
+            }
+        }
+
+        async function clearCache() {
+            if (!confirm('Clear every cached playlist and segment?')) return;
+            clearBtn.disabled = true;
+            clearBtn.textContent = 'Clearing...';
+            setStatus('Clearing cache...', 'info');
+
+            try {
+                const response = await fetch('/cache/clear', { method: 'POST' });
+                const raw = await response.text();
+                let data = {};
+                try { data = raw ? JSON.parse(raw) : {}; } catch { /* ignore parse errors */ }
+
+                if (!response.ok) {
+                    const msg = data.message || raw || 'Failed to clear cache';
+                    throw new Error(msg);
+                }
+
+                setCacheState(data.cache_enabled ?? state.cacheEnabled, state.cacheConfigured);
+                const success = data.success !== false;
+                const message = data.message || (success ? 'Cache cleared' : 'Cache is disabled');
+                setStatus(message, success ? 'success' : 'error');
+                setLastAction(`Last action: ${new Date().toLocaleTimeString()}`);
+                await Promise.all([loadMetrics(), loadStatus()]);
+            } catch (err) {
+                setStatus(err.message || 'Failed to clear cache', 'error');
+                setLastAction('Last action failed');
+            } finally {
+                clearBtn.disabled = false;
+                clearBtn.textContent = 'Clear cache';
+            }
+        }
+
+        async function toggleCache() {
+            if (state.cacheConfigured === false) return;
+            toggleBtn.disabled = true;
+            try {
+                const desired = !state.cacheEnabled;
+                const response = await fetch('/cache/toggle', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: desired }),
+                });
+                const data = await response.json();
+                if (!response.ok || data.success === false) {
+                    throw new Error(data.message || 'Failed to toggle cache');
+                }
+                setCacheState(data.cache_enabled, state.cacheConfigured);
+                setLastAction(`Cache turned ${data.cache_enabled ? 'on' : 'off'} at ${new Date().toLocaleTimeString()}`);
+                setStatus('Cache state updated', 'success');
+            } catch (err) {
+                setStatus(err.message || 'Failed to toggle cache', 'error');
+            } finally {
+                toggleBtn.disabled = false;
+            }
+        }
+
+        async function purgePath() {
+            purgeBtn.disabled = true;
+            try {
+                const path = document.getElementById('purgePath').value.trim();
+                const prefix = document.getElementById('purgePrefix').checked;
+                if (!path) throw new Error('Enter a path to purge');
+                const response = await fetch('/cache/drop', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path, prefix }),
+                });
+                const data = await response.json();
+                if (!response.ok || data.success === false) {
+                    throw new Error(data.message || 'Purge failed');
+                }
+                setStatus(`Purged ${data.removed} entries for ${prefix ? 'prefix' : 'path'} ${data.path}`, 'success');
+                setLastAction(`Purged at ${new Date().toLocaleTimeString()}`);
+                await loadStatus();
+            } catch (err) {
+                setStatus(err.message || 'Failed to purge', 'error');
+            } finally {
+                purgeBtn.disabled = false;
+            }
+        }
+
+        async function saveTTLs() {
+            saveTTLBtn.disabled = true;
+            try {
+                const payload = {};
+                const maybeAdd = (field, value) => {
+                    const num = Number(value);
+                    if (!Number.isNaN(num)) {
+                        payload[field] = num;
+                    }
+                };
+                maybeAdd('playlist_ttl_seconds', document.getElementById('playlistTTL').value);
+                maybeAdd('playlist_grace_seconds', document.getElementById('playlistGrace').value);
+                maybeAdd('segment_ttl_seconds', document.getElementById('segmentTTL').value);
+                maybeAdd('wcc_playlist_ttl_seconds', document.getElementById('wccPlaylistTTL').value);
+                maybeAdd('wcc_playlist_grace_seconds', document.getElementById('wccPlaylistGrace').value);
+
+                if (Object.keys(payload).length === 0) {
+                    throw new Error('Enter at least one TTL value');
+                }
+
+                const response = await fetch('/cache/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const data = await response.json();
+                if (!response.ok || data.success === false) {
+                    throw new Error(data.message || 'Failed to update TTLs');
+                }
+                setStatus('Cache TTLs updated', 'success');
+                await loadStatus();
+            } catch (err) {
+                setStatus(err.message || 'Failed to update TTLs', 'error');
+            } finally {
+                saveTTLBtn.disabled = false;
+            }
+        }
+
+        async function manualPrefetch() {
+            prefetchBtn.disabled = true;
+            try {
+                const path = document.getElementById('prefetchPath').value.trim();
+                if (!path) throw new Error('Enter a playlist path');
+                const response = await fetch('/cache/prefetch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path }),
+                });
+                const data = await response.json();
+                if (!response.ok || data.success === false) {
+                    throw new Error(data.message || 'Prefetch failed');
+                }
+                prefetchMeta.innerHTML = `<span class="pill good">Status ${data.status}</span><span class="pill muted">Segments queued: ${data.prefetch_scheduled}</span>`;
+                setStatus('Manual prefetch completed', 'success');
+                await loadMetrics();
+            } catch (err) {
+                setStatus(err.message || 'Prefetch failed', 'error');
+                prefetchMeta.innerHTML = `<span class="pill warn">${err.message}</span>`;
+            } finally {
+                prefetchBtn.disabled = false;
+            }
+        }
+
+        clearBtn.addEventListener('click', clearCache);
+        toggleBtn.addEventListener('click', toggleCache);
+        purgeBtn.addEventListener('click', purgePath);
+        saveTTLBtn.addEventListener('click', saveTTLs);
+        prefetchBtn.addEventListener('click', manualPrefetch);
+
+        setCacheState(null, null);
+        Promise.all([loadStatus(), loadMetrics()]);
+    </script>
+</body>
+</html>

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/ristretto"
+	"github.com/dgraph-io/ristretto/z"
 )
 
 // Metrics holds monitoring data for the edge proxy
@@ -187,6 +188,13 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", proxy.ServeMetrics)
 	mux.HandleFunc("/dashboard", proxy.ServeDashboard)
+	mux.HandleFunc("/cache", proxy.ServeCachePage)
+	mux.HandleFunc("/cache/clear", proxy.ServeCacheClear)
+	mux.HandleFunc("/cache/toggle", proxy.ServeCacheToggle)
+	mux.HandleFunc("/cache/drop", proxy.ServeCacheDrop)
+	mux.HandleFunc("/cache/config", proxy.ServeCacheConfig)
+	mux.HandleFunc("/cache/status", proxy.ServeCacheStatus)
+	mux.HandleFunc("/cache/prefetch", proxy.ServeCachePrefetch)
 	mux.HandleFunc("/ssl", proxy.ServeSSLUploadPage)
 	mux.HandleFunc("/ssl/upload", proxy.HandleSSLUpload)
 	mux.HandleFunc("/reset-metrics", proxy.ServeMetricsReset)
@@ -227,6 +235,7 @@ type config struct {
 	SVOrigin           string
 	SVHost             string
 	SVNamedOrigins     map[string]originConfig
+	SVReferer          string
 	SUOrigins          map[string]originConfig
 	SUReferer          string
 	SUSkipTLSVerify    bool
@@ -278,6 +287,16 @@ type originConfig struct {
 	Referer string
 }
 
+type cacheKeyInfo struct {
+	path string
+	hash cacheHashKey
+}
+
+type cacheHashKey struct {
+	primary  uint64
+	conflict uint64
+}
+
 func loadConfig() (*config, error) {
 	getenv := func(key, def string) string {
 		if val := strings.TrimSpace(os.Getenv(key)); val != "" {
@@ -317,6 +336,10 @@ func loadConfig() (*config, error) {
 	svOrigin := strings.TrimSpace(os.Getenv("SV_ORIGIN"))
 	svHost := strings.TrimSpace(os.Getenv("SV_HOST_HEADER"))
 	suReferer := strings.TrimSpace(os.Getenv("SU_REFERER"))
+	svReferer := strings.TrimSpace(os.Getenv("SV_REFERER"))
+	if svReferer == "" {
+		svReferer = suReferer
+	}
 	suSkipVerify, err := parseBoolEnv("SU_SKIP_TLS_VERIFY", false)
 	if err != nil {
 		return nil, err
@@ -342,7 +365,7 @@ func loadConfig() (*config, error) {
 	if err != nil {
 		return nil, err
 	}
-	svNamedOrigins := collectSVOrigins(svOrigin, svHost)
+	svNamedOrigins := collectSVOrigins(svOrigin, svHost, svReferer)
 
 	timeout := 5 * time.Second
 	if raw := strings.TrimSpace(os.Getenv("UPSTREAM_TIMEOUT")); raw != "" {
@@ -472,6 +495,7 @@ func loadConfig() (*config, error) {
 		SVOrigin:           svOrigin,
 		SVHost:             svHost,
 		SVNamedOrigins:     svNamedOrigins,
+		SVReferer:          svReferer,
 		SUOrigins:          suOrigins,
 		SUReferer:          suReferer,
 		SUSkipTLSVerify:    suSkipVerify,
@@ -580,11 +604,14 @@ type edgeProxy struct {
 	oryxCounter       atomic.Uint64
 	upstreamDelay     time.Duration
 	cache             *ristretto.Cache
-	playlistTTL       time.Duration
-	playlistGrace     time.Duration
-	wccPlaylistTTL    time.Duration
-	wccPlaylistGrace  time.Duration
-	segmentTTL        time.Duration
+	cacheOn           atomic.Bool
+	cacheKeys         *sync.Map
+	cacheHashIndex    *sync.Map
+	playlistTTL       atomic.Int64
+	playlistGrace     atomic.Int64
+	wccPlaylistTTL    atomic.Int64
+	wccPlaylistGrace  atomic.Int64
+	segmentTTL        atomic.Int64
 	prefetchBatch     int
 	prefetchSem       chan struct{}
 	prefetchOn        bool
@@ -638,6 +665,16 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 		}
 	}
 
+	metrics := newMetrics()
+	cacheKeys := &sync.Map{}
+	cacheHashIndex := &sync.Map{}
+	decCacheSize := func(n uint64) {
+		if n == 0 {
+			return
+		}
+		metrics.cacheSize.Add(^uint64(n - 1)) // subtract n
+	}
+
 	var oryxTargets []*upstreamTarget
 	var oryxNamed map[string]*upstreamTarget
 	var oryxPrefixes []string
@@ -672,7 +709,11 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 			if err != nil {
 				return nil, fmt.Errorf("invalid SV origin %s: %w", name, err)
 			}
-			svTargets[name] = buildTarget(svURL, spec.Host, "", "", false)
+			referer := spec.Referer
+			if referer == "" {
+				referer = cfg.SVReferer
+			}
+			svTargets[name] = buildTarget(svURL, spec.Host, "", referer, false)
 			svPrefixes = append(svPrefixes, name)
 		}
 		sortNamedPrefixes(svPrefixes)
@@ -760,6 +801,24 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 			Cost: func(value interface{}) int64 {
 				return 1
 			},
+			KeyToHash: func(key interface{}) (uint64, uint64) {
+				h1, h2 := z.KeyToHash(key)
+				if keyStr, ok := key.(string); ok {
+					cacheHashIndex.Store(cacheHashKey{primary: h1, conflict: h2}, keyStr)
+				}
+				return h1, h2
+			},
+			OnEvict: func(item *ristretto.Item) {
+				metrics.cacheEvicted.Add(1)
+				hashKey := cacheHashKey{primary: item.Key, conflict: item.Conflict}
+				if key, ok := cacheHashIndex.LoadAndDelete(hashKey); ok {
+					if keyStr, ok := key.(string); ok {
+						if _, existed := cacheKeys.LoadAndDelete(keyStr); existed {
+							decCacheSize(1)
+						}
+					}
+				}
+			},
 		}
 		var err error
 		cache, err = ristretto.NewCache(cacheConfig)
@@ -773,7 +832,7 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 		prefetchSem = make(chan struct{}, cfg.PrefetchWorkers)
 	}
 
-	return &edgeProxy{
+	proxy := &edgeProxy{
 		clientStrict:      clientStrict,
 		clientInsecure:    clientInsecure,
 		oryxTargets:       oryxTargets,
@@ -798,16 +857,22 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 		certUploadPass:    cfg.CertUploadPassword,
 		upstreamDelay:     cfg.UpstreamTimeout,
 		cache:             cache,
-		playlistTTL:       cfg.PlaylistTTL,
-		playlistGrace:     cfg.PlaylistGrace,
-		wccPlaylistTTL:    cfg.WCCPlaylistTTL,
-		wccPlaylistGrace:  cfg.WCCPlaylistGrace,
-		segmentTTL:        cfg.SegmentTTL,
+		cacheKeys:         cacheKeys,
+		cacheHashIndex:    cacheHashIndex,
 		prefetchBatch:     cfg.PrefetchBatch,
 		prefetchSem:       prefetchSem,
 		prefetchOn:        cfg.PrefetchEnabled && cfg.PrefetchWorkers > 0 && cfg.PrefetchBatch > 0,
-		metrics:           newMetrics(),
-	}, nil
+		metrics:           metrics,
+	}
+
+	proxy.playlistTTL.Store(cfg.PlaylistTTL.Nanoseconds())
+	proxy.playlistGrace.Store(cfg.PlaylistGrace.Nanoseconds())
+	proxy.wccPlaylistTTL.Store(cfg.WCCPlaylistTTL.Nanoseconds())
+	proxy.wccPlaylistGrace.Store(cfg.WCCPlaylistGrace.Nanoseconds())
+	proxy.segmentTTL.Store(cfg.SegmentTTL.Nanoseconds())
+	proxy.cacheOn.Store(cache != nil)
+
+	return proxy, nil
 }
 
 func (p *edgeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -909,14 +974,18 @@ func (p *edgeProxy) fetchAndStore(ctx context.Context, reqURL *url.URL, target *
 		}
 	}
 
+	if !p.cacheActive() {
+		return resp, nil
+	}
+
 	ttl := p.ttlForPath(reqURL.Path)
 	grace := time.Duration(0)
 	if isPlaylistPath(reqURL.Path) {
-		ttl = p.playlistTTL
-		grace = p.playlistGrace
+		ttl = time.Duration(p.playlistTTL.Load())
+		grace = time.Duration(p.playlistGrace.Load())
 		if target == p.wccTarget {
-			ttl = p.wccPlaylistTTL
-			grace = p.wccPlaylistGrace
+			ttl = time.Duration(p.wccPlaylistTTL.Load())
+			grace = time.Duration(p.wccPlaylistGrace.Load())
 		}
 	}
 
@@ -975,7 +1044,7 @@ func (p *edgeProxy) fetchFromOrigin(ctx context.Context, reqURL *url.URL, target
 }
 
 func (p *edgeProxy) storeCacheEntry(reqURL *url.URL, resp *cachedResponse, prefetched bool, ttl time.Duration, grace time.Duration) {
-	if p.cache == nil || !shouldCache(resp.status) {
+	if !p.cacheActive() || !shouldCache(resp.status) {
 		return
 	}
 	if ttl <= 0 {
@@ -986,11 +1055,13 @@ func (p *edgeProxy) storeCacheEntry(reqURL *url.URL, resp *cachedResponse, prefe
 		storeTTL += grace
 	}
 	value := &cacheValue{resp: resp, prefetched: prefetched, storedAt: time.Now(), path: reqURL.Path, ttl: ttl, grace: grace}
-	p.cache.SetWithTTL(cacheKeyForURL(reqURL), value, 1, storeTTL)
+	key := cacheKeyForURL(reqURL)
+	p.incrementCacheSizeIfNew(key, reqURL.Path)
+	p.cache.SetWithTTL(key, value, 1, storeTTL)
 }
 
 func (p *edgeProxy) getFromCache(key string) (*cachedResponse, bool, bool, bool) {
-	if p.cache == nil {
+	if !p.cacheActive() {
 		return nil, false, false, false
 	}
 	if raw, ok := p.cache.Get(key); ok {
@@ -1011,7 +1082,7 @@ func (p *edgeProxy) getFromCache(key string) (*cachedResponse, bool, bool, bool)
 }
 
 func (p *edgeProxy) cacheContains(key string) bool {
-	if p.cache == nil {
+	if !p.cacheActive() {
 		return false
 	}
 	_, ok := p.cache.Get(key)
@@ -1285,6 +1356,30 @@ func (p *edgeProxy) ServeDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ServeCachePage serves the cache management HTML page
+func (p *edgeProxy) ServeCachePage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	content, err := os.ReadFile("cache.html")
+	if err != nil {
+		log.Printf("error reading cache.html: %v", err)
+		http.Error(w, "Cache page not available", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+
+	if _, err := w.Write(content); err != nil {
+		log.Printf("error serving cache page: %v", err)
+	}
+}
+
 type certUploadRequest struct {
 	Target      string `json:"target"`
 	Certificate string `json:"certificate"`
@@ -1447,6 +1542,312 @@ func (p *edgeProxy) authorizeCertUpload(w http.ResponseWriter, r *http.Request) 
 	return true
 }
 
+// ServeCacheClear handles POST requests to clear the cache
+func (p *edgeProxy) ServeCacheClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed - use POST", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Cache-Control", "no-store")
+
+	cacheConfigured := p.cache != nil
+	cacheEnabled := p.cacheActive()
+	cleared := false
+
+	if cacheConfigured {
+		p.cache.Clear()
+		p.clearCacheKeys()
+		p.metrics.cacheSize.Store(0)
+		cleared = true
+		log.Println("cache cleared via /cache/clear")
+	}
+
+	response := map[string]interface{}{
+		"success":          cleared,
+		"cache_enabled":    cacheEnabled,
+		"cache_configured": cacheConfigured,
+		"cleared":          cleared,
+		"timestamp":        time.Now().Format(time.RFC3339),
+	}
+
+	switch {
+	case !cacheConfigured:
+		response["message"] = "Cache is not configured"
+	case cacheEnabled:
+		response["message"] = "Cache cleared"
+	default:
+		response["message"] = "Cache is disabled; cleared stored items but responses will bypass cache"
+	}
+
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Printf("error encoding cache clear response: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+}
+
+// ServeCacheToggle enables or disables the cache without restarting the process
+func (p *edgeProxy) ServeCacheToggle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed - use POST", http.StatusMethodNotAllowed)
+		return
+	}
+	if p.cache == nil {
+		http.Error(w, "Cache is not configured", http.StatusBadRequest)
+		return
+	}
+
+	var payload struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+	if payload.Enabled == nil {
+		http.Error(w, "enabled is required", http.StatusBadRequest)
+		return
+	}
+
+	p.cacheOn.Store(*payload.Enabled)
+
+	response := map[string]interface{}{
+		"success":       true,
+		"cache_enabled": p.cacheActive(),
+		"message":       "Cache state updated",
+		"timestamp":     time.Now().Format(time.RFC3339),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Printf("error encoding cache toggle response: %v", err)
+	}
+}
+
+// ServeCacheDrop removes cached entries for a specific path or prefix
+func (p *edgeProxy) ServeCacheDrop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed - use POST", http.StatusMethodNotAllowed)
+		return
+	}
+	if !p.cacheActive() {
+		http.Error(w, "Cache is disabled or not configured", http.StatusBadRequest)
+		return
+	}
+
+	var payload struct {
+		Path   string `json:"path"`
+		Prefix bool   `json:"prefix"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+	payload.Path = strings.TrimSpace(payload.Path)
+	if payload.Path == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+
+	removed := p.dropCacheEntries(payload.Path, payload.Prefix)
+
+	resp := map[string]interface{}{
+		"success":   true,
+		"removed":   removed,
+		"prefix":    payload.Prefix,
+		"path":      payload.Path,
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("error encoding cache drop response: %v", err)
+	}
+}
+
+// ServeCacheConfig updates TTL/grace configuration at runtime
+func (p *edgeProxy) ServeCacheConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed - use POST", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var payload struct {
+		PlaylistTTLSeconds      *float64 `json:"playlist_ttl_seconds"`
+		PlaylistGraceSeconds    *float64 `json:"playlist_grace_seconds"`
+		WCCPlaylistTTLSeconds   *float64 `json:"wcc_playlist_ttl_seconds"`
+		WCCPlaylistGraceSeconds *float64 `json:"wcc_playlist_grace_seconds"`
+		SegmentTTLSeconds       *float64 `json:"segment_ttl_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+
+	if payload.PlaylistTTLSeconds == nil &&
+		payload.PlaylistGraceSeconds == nil &&
+		payload.WCCPlaylistTTLSeconds == nil &&
+		payload.WCCPlaylistGraceSeconds == nil &&
+		payload.SegmentTTLSeconds == nil {
+		http.Error(w, "At least one TTL field is required", http.StatusBadRequest)
+		return
+	}
+
+	if payload.PlaylistTTLSeconds != nil {
+		dur := time.Duration(*payload.PlaylistTTLSeconds * float64(time.Second))
+		if dur <= 0 {
+			http.Error(w, "playlist_ttl_seconds must be greater than zero", http.StatusBadRequest)
+			return
+		}
+		p.playlistTTL.Store(dur.Nanoseconds())
+	}
+	if payload.PlaylistGraceSeconds != nil {
+		if *payload.PlaylistGraceSeconds < 0 {
+			http.Error(w, "playlist_grace_seconds cannot be negative", http.StatusBadRequest)
+			return
+		}
+		dur := time.Duration(*payload.PlaylistGraceSeconds * float64(time.Second))
+		p.playlistGrace.Store(dur.Nanoseconds())
+	}
+	if payload.WCCPlaylistTTLSeconds != nil {
+		dur := time.Duration(*payload.WCCPlaylistTTLSeconds * float64(time.Second))
+		if dur <= 0 {
+			http.Error(w, "wcc_playlist_ttl_seconds must be greater than zero", http.StatusBadRequest)
+			return
+		}
+		p.wccPlaylistTTL.Store(dur.Nanoseconds())
+	}
+	if payload.WCCPlaylistGraceSeconds != nil {
+		if *payload.WCCPlaylistGraceSeconds < 0 {
+			http.Error(w, "wcc_playlist_grace_seconds cannot be negative", http.StatusBadRequest)
+			return
+		}
+		dur := time.Duration(*payload.WCCPlaylistGraceSeconds * float64(time.Second))
+		p.wccPlaylistGrace.Store(dur.Nanoseconds())
+	}
+	if payload.SegmentTTLSeconds != nil {
+		dur := time.Duration(*payload.SegmentTTLSeconds * float64(time.Second))
+		if dur <= 0 {
+			http.Error(w, "segment_ttl_seconds must be greater than zero", http.StatusBadRequest)
+			return
+		}
+		p.segmentTTL.Store(dur.Nanoseconds())
+	}
+
+	resp := map[string]interface{}{
+		"success":       true,
+		"message":       "Cache TTL configuration updated",
+		"cache_enabled": p.cacheActive(),
+		"config":        p.cacheConfigSnapshot(),
+		"timestamp":     time.Now().Format(time.RFC3339),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("error encoding cache config response: %v", err)
+	}
+}
+
+// ServeCacheStatus exposes cache state and TTL configuration
+func (p *edgeProxy) ServeCacheStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	resp := map[string]interface{}{
+		"cache_configured": p.cache != nil,
+		"cache_enabled":    p.cacheActive(),
+		"cache_size":       p.metrics.cacheSize.Load(),
+		"cache_evicted":    p.metrics.cacheEvicted.Load(),
+		"config":           p.cacheConfigSnapshot(),
+		"timestamp":        time.Now().Format(time.RFC3339),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("error encoding cache status response: %v", err)
+	}
+}
+
+// ServeCachePrefetch triggers a manual prefetch for the given path
+func (p *edgeProxy) ServeCachePrefetch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed - use POST", http.StatusMethodNotAllowed)
+		return
+	}
+	if !p.cacheActive() {
+		http.Error(w, "Cache is disabled or not configured", http.StatusBadRequest)
+		return
+	}
+
+	var payload struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+	payload.Path = strings.TrimSpace(payload.Path)
+	if payload.Path == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+
+	target, upstreamPath, err := p.selectUpstream(payload.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if target == nil || target.base == nil {
+		http.Error(w, "No upstream available for path", http.StatusBadRequest)
+		return
+	}
+
+	reqURL := buildRequestURL(target.base, upstreamPath, "")
+	ctx, cancel := context.WithTimeout(context.Background(), p.upstreamDelay)
+	defer cancel()
+
+	resp, fetchErr := p.fetchAndStore(ctx, &reqURL, target, true)
+	if fetchErr != nil {
+		log.Printf("manual prefetch failed for %s: %v", reqURL.Redacted(), fetchErr)
+		http.Error(w, fmt.Sprintf("prefetch failed: %v", fetchErr), http.StatusBadGateway)
+		return
+	}
+
+	scheduled := 0
+	if resp != nil && shouldCache(resp.status) && isPlaylistPath(upstreamPath) {
+		parsed := parsePlaylistEntries(&reqURL, resp.body)
+		scheduled = p.scheduleSegmentPrefetches(target, parsed.segments)
+	}
+
+	statusCode := 0
+	if resp != nil {
+		statusCode = resp.status
+	}
+
+	result := map[string]interface{}{
+		"success":            true,
+		"path":               payload.Path,
+		"status":             statusCode,
+		"prefetch_scheduled": scheduled,
+		"timestamp":          time.Now().Format(time.RFC3339),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		log.Printf("error encoding cache prefetch response: %v", err)
+	}
+}
+
 // ServeMetricsReset handles POST requests to reset metrics
 func (p *edgeProxy) ServeMetricsReset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1547,12 +1948,12 @@ func (p *edgeProxy) applyCacheHeaders(header http.Header, path string) {
 
 func (p *edgeProxy) ttlForPath(path string) time.Duration {
 	if isPlaylistPath(path) {
-		return p.playlistTTL
+		return time.Duration(p.playlistTTL.Load())
 	}
 	if isSegmentPath(path) {
-		return p.segmentTTL
+		return time.Duration(p.segmentTTL.Load())
 	}
-	return p.segmentTTL
+	return time.Duration(p.segmentTTL.Load())
 }
 
 func (p *edgeProxy) forwardHeaders(target *upstreamTarget) map[string]string {
@@ -1707,6 +2108,9 @@ func (p *edgeProxy) schedulePrefetch(target *upstreamTarget, playlistPath string
 	if target == nil || target.base == nil {
 		return 0
 	}
+	if !p.cacheActive() {
+		return 0
+	}
 	if !p.prefetchOn || p.prefetchSem == nil || p.prefetchBatch <= 0 || len(body) == 0 {
 		return 0
 	}
@@ -1721,6 +2125,9 @@ func (p *edgeProxy) schedulePrefetchFromPlaylist(target *upstreamTarget, playlis
 }
 
 func (p *edgeProxy) scheduleSegmentPrefetches(target *upstreamTarget, segments []*url.URL) int {
+	if !p.cacheActive() || p.prefetchSem == nil {
+		return 0
+	}
 	scheduled := 0
 	for _, segURL := range segments {
 		if segURL == nil {
@@ -1947,6 +2354,100 @@ func (p *edgeProxy) writeResponse(w http.ResponseWriter, header http.Header, sta
 	}
 }
 
+func (p *edgeProxy) cacheActive() bool {
+	return p.cache != nil && p.cacheOn.Load()
+}
+
+func (p *edgeProxy) incrementCacheSizeIfNew(key, path string) cacheHashKey {
+	var hash cacheHashKey
+	if key != "" {
+		h1, h2 := z.KeyToHash(key)
+		hash = cacheHashKey{primary: h1, conflict: h2}
+	}
+	if p.cacheKeys != nil {
+		if _, exists := p.cacheKeys.LoadOrStore(key, cacheKeyInfo{path: path, hash: hash}); !exists {
+			p.metrics.cacheSize.Add(1)
+		}
+	}
+	if p.cacheHashIndex != nil && hash.primary != 0 {
+		p.cacheHashIndex.Store(hash, key)
+	}
+	return hash
+}
+
+func (p *edgeProxy) removeCacheKey(key string) bool {
+	if p.cacheKeys == nil {
+		return false
+	}
+	if info, exists := p.cacheKeys.LoadAndDelete(key); exists {
+		if keyInfo, ok := info.(cacheKeyInfo); ok && p.cacheHashIndex != nil {
+			p.cacheHashIndex.Delete(keyInfo.hash)
+		}
+		p.metrics.cacheSize.Add(^uint64(0))
+		return true
+	}
+	return false
+}
+
+func (p *edgeProxy) clearCacheKeys() {
+	if p.cacheKeys == nil {
+		return
+	}
+	p.cacheKeys.Range(func(key, value interface{}) bool {
+		p.cacheKeys.Delete(key)
+		return true
+	})
+	if p.cacheHashIndex != nil {
+		p.cacheHashIndex.Range(func(key, value interface{}) bool {
+			p.cacheHashIndex.Delete(key)
+			return true
+		})
+	}
+	p.metrics.cacheSize.Store(0)
+}
+
+func (p *edgeProxy) cacheConfigSnapshot() map[string]float64 {
+	return map[string]float64{
+		"playlist_ttl_seconds":       float64(time.Duration(p.playlistTTL.Load())) / float64(time.Second),
+		"playlist_grace_seconds":     float64(time.Duration(p.playlistGrace.Load())) / float64(time.Second),
+		"wcc_playlist_ttl_seconds":   float64(time.Duration(p.wccPlaylistTTL.Load())) / float64(time.Second),
+		"wcc_playlist_grace_seconds": float64(time.Duration(p.wccPlaylistGrace.Load())) / float64(time.Second),
+		"segment_ttl_seconds":        float64(time.Duration(p.segmentTTL.Load())) / float64(time.Second),
+	}
+}
+
+func (p *edgeProxy) dropCacheEntries(path string, prefix bool) int {
+	if !p.cacheActive() {
+		return 0
+	}
+	normalized := strings.TrimSpace(path)
+	if normalized == "" {
+		return 0
+	}
+
+	var removed int
+	p.cacheKeys.Range(func(key, value interface{}) bool {
+		keyStr, ok := key.(string)
+		info, okInfo := value.(cacheKeyInfo)
+		if !ok || !okInfo {
+			return true
+		}
+		match := info.path == normalized
+		if !match && prefix {
+			match = strings.HasPrefix(info.path, normalized)
+		}
+		if match {
+			p.cache.Del(keyStr)
+			if p.removeCacheKey(keyStr) {
+				p.metrics.cacheEvicted.Add(1)
+			}
+			removed++
+		}
+		return true
+	})
+	return removed
+}
+
 func (p *edgeProxy) scheduleRevalidate(target *upstreamTarget, reqURL *url.URL) {
 	if target == nil || target.base == nil {
 		return
@@ -2062,9 +2563,9 @@ func sortNamedPrefixes(prefixes []string) {
 	})
 }
 
-func collectSVOrigins(defaultOrigin, defaultHost string) map[string]originConfig {
+func collectSVOrigins(defaultOrigin, defaultHost, defaultReferer string) map[string]originConfig {
 	entries := make(map[string]originConfig)
-	addEntry := func(name, origin, host string) {
+	addEntry := func(name, origin, host, referer string) {
 		origin = strings.TrimSpace(origin)
 		if origin == "" {
 			return
@@ -2074,12 +2575,13 @@ func collectSVOrigins(defaultOrigin, defaultHost string) map[string]originConfig
 			return
 		}
 		entries[key] = originConfig{
-			Origin: origin,
-			Host:   strings.TrimSpace(host),
+			Origin:  origin,
+			Host:    strings.TrimSpace(host),
+			Referer: strings.TrimSpace(referer),
 		}
 	}
 	if strings.TrimSpace(defaultOrigin) != "" {
-		addEntry("sv", defaultOrigin, defaultHost)
+		addEntry("sv", defaultOrigin, defaultHost, defaultReferer)
 	}
 	for _, kv := range os.Environ() {
 		parts := strings.SplitN(kv, "=", 2)
@@ -2096,8 +2598,12 @@ func collectSVOrigins(defaultOrigin, defaultHost string) map[string]originConfig
 		}
 		suffix := strings.TrimPrefix(key, "SV_ORIGIN")
 		host := strings.TrimSpace(os.Getenv("SV_HOST_HEADER" + suffix))
+		referer := strings.TrimSpace(os.Getenv("SV_REFERER" + suffix))
+		if referer == "" {
+			referer = defaultReferer
+		}
 		name := "sv" + strings.ToLower(strings.TrimSpace(suffix))
-		addEntry(name, origin, host)
+		addEntry(name, origin, host, referer)
 	}
 	if len(entries) == 0 {
 		return nil
