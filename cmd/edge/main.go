@@ -903,12 +903,18 @@ func (p *edgeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			cacheMark = "STALE"
 			p.scheduleRevalidate(target, &reqURL)
 		}
+		if target == p.aplTarget && isSegmentPath(upstreamPath) {
+			log.Printf("APL: cache %s for segment %s (prefetched=%v)", cacheMark, upstreamPath, prefetched)
+		}
 		p.writeResponse(w, entry.header, entry.status, entry.body, cacheMark, boolToPrefetch(prefetched))
 		p.updateResponseTime(start)
 		return
 	}
 
 	p.metrics.cacheMisses.Add(1)
+	if target == p.aplTarget && isSegmentPath(upstreamPath) {
+		log.Printf("APL: cache MISS for segment %s", upstreamPath)
+	}
 	resp, err := p.fetchAndStore(ctx, &reqURL, target, false)
 	if err != nil {
 		p.recordOriginFailure(target, err)
@@ -919,7 +925,15 @@ func (p *edgeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	prefetchCount := 0
 	if shouldCache(resp.status) && isPlaylistPath(upstreamPath) {
-		prefetchCount = p.schedulePrefetch(target, upstreamPath, resp.body)
+		// For APL, immediately cache the first upcoming segment synchronously before async prefetch
+		if target == p.aplTarget {
+			prefetchCount = p.scheduleAPLPrefetchWithImmediate(target, upstreamPath, resp.body)
+		} else {
+			prefetchCount = p.schedulePrefetch(target, upstreamPath, resp.body)
+		}
+		if target == p.aplTarget && prefetchCount > 0 {
+			log.Printf("APL: prefetched %d segments for playlist %s", prefetchCount, upstreamPath)
+		}
 	}
 
 	p.writeResponse(w, resp.header, resp.status, resp.body, "MISS", strconv.Itoa(prefetchCount))
@@ -2119,6 +2133,78 @@ func (p *edgeProxy) schedulePrefetch(target *upstreamTarget, playlistPath string
 	return p.schedulePrefetchFromPlaylist(target, &playlistURL, body)
 }
 
+// scheduleAPLPrefetchWithImmediate immediately caches future segments and 
+// schedules async prefetch for the rest to maximize APL cache hit rate
+func (p *edgeProxy) scheduleAPLPrefetchWithImmediate(target *upstreamTarget, playlistPath string, body []byte) int {
+	if target == nil || target.base == nil {
+		return 0
+	}
+	if !p.cacheActive() {
+		return 0
+	}
+	if !p.prefetchOn || p.prefetchSem == nil || p.prefetchBatch <= 0 || len(body) == 0 {
+		return 0
+	}
+
+	playlistURL := buildRequestURL(target.base, playlistPath, "")
+	parsed := parsePlaylistEntries(&playlistURL, body)
+	
+	// Generate extended lookahead with many more future segments
+	segmentsWithLookahead := p.generateAPLLookahead(parsed.segments)
+	
+	// For APL, immediately cache the NEXT 5-10 segments that will likely be requested
+	// The player often requests segments ahead of the playlist update
+	immediateCacheCount := 10
+	if len(segmentsWithLookahead) < immediateCacheCount {
+		immediateCacheCount = len(segmentsWithLookahead)
+	}
+	
+	// Start from the END of the actual playlist (most likely to be requested next)
+	startIdx := len(parsed.segments) - 3
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	
+	cached := 0
+	for i := startIdx; i < len(segmentsWithLookahead) && cached < immediateCacheCount; i++ {
+		segURL := segmentsWithLookahead[i]
+		if segURL == nil {
+			continue
+		}
+		key := cacheKeyForURL(segURL)
+		if p.cacheContains(key) {
+			continue
+		}
+		
+		// Fetch immediately (synchronously) to ensure it's cached before player requests it
+		ctx, cancel := context.WithTimeout(context.Background(), p.upstreamDelay)
+		if _, err := p.fetchAndStore(ctx, segURL, target, true); err == nil {
+			log.Printf("APL: immediate cached segment %s", segURL.Path)
+			cached++
+		}
+		cancel()
+	}
+	
+	// Now schedule async prefetch for earlier segments and remaining future segments
+	scheduled := 0
+	for i := 0; i < len(segmentsWithLookahead) && scheduled < p.prefetchBatch; i++ {
+		segURL := segmentsWithLookahead[i]
+		if segURL == nil {
+			continue
+		}
+		key := cacheKeyForURL(segURL)
+		if p.cacheContains(key) {
+			continue
+		}
+		
+		scheduled++
+		p.metrics.prefetchScheduled.Add(1)
+		p.spawnPrefetch(target, segURL)
+	}
+	
+	return cached + scheduled
+}
+
 func (p *edgeProxy) schedulePrefetchFromPlaylist(target *upstreamTarget, playlistURL *url.URL, body []byte) int {
 	parsed := parsePlaylistEntries(playlistURL, body)
 	return p.scheduleSegmentPrefetches(target, parsed.segments)
@@ -2129,7 +2215,15 @@ func (p *edgeProxy) scheduleSegmentPrefetches(target *upstreamTarget, segments [
 		return 0
 	}
 	scheduled := 0
-	for _, segURL := range segments {
+	
+	// For APL, prefetch ALL segments in playlist + generate lookahead URLs
+	segmentsToFetch := segments
+	if target == p.aplTarget && len(segments) > 0 {
+		// Extract segment number pattern and generate lookahead segments
+		segmentsToFetch = p.generateAPLLookahead(segments)
+	}
+	
+	for _, segURL := range segmentsToFetch {
 		if segURL == nil {
 			continue
 		}
@@ -2283,6 +2377,79 @@ func parseBandwidth(line string) int {
 	return bw
 }
 
+// generateAPLLookahead creates additional segment URLs beyond what's in the playlist
+// to preemptively cache segments that will be requested soon
+func (p *edgeProxy) generateAPLLookahead(segments []*url.URL) []*url.URL {
+	if len(segments) == 0 {
+		return segments
+	}
+	
+	result := make([]*url.URL, 0, len(segments)+10)
+	result = append(result, segments...)
+	
+	// Find the last segment and extract its number
+	lastSeg := segments[len(segments)-1]
+	if lastSeg == nil {
+		return result
+	}
+	
+	// Parse segment number from URL like "apexgaming000006163.ts"
+	path := lastSeg.Path
+	lastSlash := strings.LastIndex(path, "/")
+	if lastSlash < 0 {
+		return result
+	}
+	
+	filename := path[lastSlash+1:]
+	// Extract number from filename
+	var prefix string
+	var segNum int
+	var suffix string
+	
+	// Match pattern: prefix + digits + suffix (e.g., "apexgaming000006163.ts")
+	for i := len(filename) - 1; i >= 0; i-- {
+		if filename[i] >= '0' && filename[i] <= '9' {
+			continue
+		}
+		if i < len(filename)-1 {
+			// Found the start of the number
+			prefix = filename[:i+1]
+			numStr := ""
+			j := i + 1
+			for j < len(filename) && filename[j] >= '0' && filename[j] <= '9' {
+				numStr += string(filename[j])
+				j++
+			}
+			suffix = filename[j:]
+			segNum, _ = strconv.Atoi(numStr)
+			break
+		}
+	}
+	
+	if prefix == "" || segNum == 0 {
+		return result
+	}
+	
+	// Generate next 20 segments to handle aggressive players
+	numDigits := len(strconv.Itoa(segNum))
+	for i := 1; i <= 20; i++ {
+		nextNum := segNum + i
+		nextNumStr := strconv.Itoa(nextNum)
+		// Pad with zeros to match original format
+		for len(nextNumStr) < numDigits {
+			nextNumStr = "0" + nextNumStr
+		}
+		nextFilename := prefix + nextNumStr + suffix
+		nextPath := path[:lastSlash+1] + nextFilename
+		
+		nextURL := *lastSeg // Copy the URL
+		nextURL.Path = nextPath
+		result = append(result, &nextURL)
+	}
+	
+	return result
+}
+
 func parseAttribute(line, key string) string {
 	idx := strings.Index(line, ":")
 	if idx == -1 || idx == len(line)-1 {
@@ -2318,9 +2485,16 @@ func (p *edgeProxy) spawnPrefetch(target *upstreamTarget, segURL *url.URL) {
 		defer cancel()
 		if _, err := p.fetchAndStore(ctx, segURL, target, true); err != nil {
 			p.metrics.prefetchFailures.Add(1)
-			log.Printf("prefetch %s failed: %v", segURL.Redacted(), err)
+			if target == p.aplTarget {
+				log.Printf("APL prefetch %s failed: %v", segURL.Redacted(), err)
+			} else {
+				log.Printf("prefetch %s failed: %v", segURL.Redacted(), err)
+			}
 		} else {
 			p.metrics.prefetchSuccess.Add(1)
+			if target == p.aplTarget {
+				log.Printf("APL prefetch %s succeeded", segURL.Redacted())
+			}
 		}
 	}()
 }
