@@ -104,18 +104,26 @@ server {
     # Add cache status header
     add_header X-Cache-Status $upstream_cache_status always;
 
-    # APL playlists - no cache
+    # APL playlists - 1s cache
     location ~ ^/(.*\.m3u8)$ {
         proxy_pass http://edge_go_backend/apl/stream/streams/$1;
         
-        proxy_buffering off;
+        proxy_cache hls_cache;
+        proxy_cache_key "$scheme$proxy_host$request_uri";
+        proxy_cache_valid 200 1s;
+        proxy_cache_use_stale error timeout updating;
+        proxy_buffering on;
     }
     
-    # APL segments - no cache
+    # APL segments - 30s cache
     location ~ ^/(.*\.ts)$ {
         proxy_pass http://edge_go_backend/apl/stream/streams/$1;
         
-        proxy_buffering off;
+        proxy_cache hls_cache;
+        proxy_cache_key "$scheme$proxy_host$request_uri";
+        proxy_cache_valid 200 30s;
+        proxy_cache_use_stale error timeout updating;
+        proxy_buffering on;
     }
     proxy_connect_timeout 3s;
     proxy_send_timeout 10s;
