@@ -121,7 +121,7 @@ server {
         
         proxy_cache hls_cache;
         proxy_cache_key "$scheme$proxy_host$request_uri";
-        proxy_cache_valid 200 30s;
+        proxy_cache_valid 200 10s;
         proxy_cache_use_stale error timeout updating;
         proxy_buffering on;
     }

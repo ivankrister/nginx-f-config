@@ -89,6 +89,7 @@ services:
       - CERT_UPLOAD_PASSWORD=${CERT_UPLOAD_PASSWORD}
     volumes:
       - ./keys:/app/keys
+      - ./cache/go:/app/cache
     ports:
       - "9000:9000"  # Expose metrics endpoint to host
     expose:
@@ -109,7 +110,8 @@ services:
       - DHPARAM_BITS=${DHPARAM_BITS:-2048}
     ports:
       - "8080:80"
-      - "8443:443"
+      - "443:443"
     volumes:
       - ./keys:/etc/nginx/keys
+      - ./cache/nginx:/var/cache/nginx
     restart: unless-stopped

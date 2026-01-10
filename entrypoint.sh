@@ -1,6 +1,12 @@
 #!/bin/sh
 set -e
 
+# Clear nginx cache on startup
+echo "Clearing nginx cache..."
+rm -rf /var/cache/nginx/* 2>/dev/null || true
+rm -rf /tmp/nginx/* 2>/dev/null || true
+echo "Nginx cache cleared"
+
 TEMPLATE_DIR=/etc/nginx/templates
 CONF_DIR=/etc/nginx/conf.d
 KEYS_DIR=/etc/nginx/keys
