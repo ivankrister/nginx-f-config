@@ -893,6 +893,7 @@ func (p *edgeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Build URL for origin request (upstreamPath has timestamp stripped for APL segments)
 	reqURL := buildRequestURL(target.base, upstreamPath, r.URL.RawQuery)
 	cacheKey := cacheKeyForURL(&reqURL)
 
@@ -1011,7 +1012,19 @@ func (p *edgeProxy) fetchFromOrigin(ctx context.Context, reqURL *url.URL, target
 	p.metrics.originRequests.Add(1)
 	p.incrementOriginRequest(target)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
+	// For APL segments with timestamps, strip the timestamp before requesting from origin
+	originURL := *reqURL
+	if target == p.aplTarget && isSegmentPath(reqURL.Path) {
+		lastSlash := strings.LastIndex(originURL.Path, "/")
+		if lastSlash >= 0 {
+			dir := originURL.Path[:lastSlash+1]
+			filename := originURL.Path[lastSlash+1:]
+			strippedFilename := stripTimestampFromSegment(filename)
+			originURL.Path = dir + strippedFilename
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, originURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1047,6 +1060,14 @@ func (p *edgeProxy) fetchFromOrigin(ctx context.Context, reqURL *url.URL, target
 	}
 
 	header := sanitizeHeader(resp.Header)
+	
+	// Transform APL playlists to add timestamps to segment names
+	if target == p.aplTarget && isPlaylistPath(reqURL.Path) {
+		body = transformAPLPlaylist(body)
+		// Remove Content-Length as body size changed
+		header.Del("Content-Length")
+	}
+
 	header.Set("Access-Control-Allow-Origin", "*")
 	p.applyCacheHeaders(header, reqURL.Path)
 	header.Set("X-Edge-Go", "1")
@@ -1064,13 +1085,23 @@ func (p *edgeProxy) storeCacheEntry(reqURL *url.URL, resp *cachedResponse, prefe
 	if ttl <= 0 {
 		return
 	}
+	key := cacheKeyForURL(reqURL)
+	p.storeCacheEntryWithKey(key, reqURL.Path, resp, prefetched, ttl, grace)
+}
+
+func (p *edgeProxy) storeCacheEntryWithKey(key string, path string, resp *cachedResponse, prefetched bool, ttl time.Duration, grace time.Duration) {
+	if !p.cacheActive() || !shouldCache(resp.status) {
+		return
+	}
+	if ttl <= 0 {
+		return
+	}
 	storeTTL := ttl
 	if grace > 0 {
 		storeTTL += grace
 	}
-	value := &cacheValue{resp: resp, prefetched: prefetched, storedAt: time.Now(), path: reqURL.Path, ttl: ttl, grace: grace}
-	key := cacheKeyForURL(reqURL)
-	p.incrementCacheSizeIfNew(key, reqURL.Path)
+	value := &cacheValue{resp: resp, prefetched: prefetched, storedAt: time.Now(), path: path, ttl: ttl, grace: grace}
+	p.incrementCacheSizeIfNew(key, path)
 	p.cache.SetWithTTL(key, value, 1, storeTTL)
 }
 
@@ -2059,6 +2090,8 @@ func (p *edgeProxy) selectUpstream(path string) (*upstreamTarget, string, error)
 			return nil, "", errors.New("APL origin not configured")
 		}
 		translated := trimPrefix(path, "/apl")
+		// Keep timestamp in the path for cache key differentiation
+		// We'll strip it when making the actual origin request
 		return p.aplTarget, translated, nil
 	case strings.HasPrefix(path, "/__prefetch/acf"):
 		if target, trimmed, ok := matchNamed(path, "/__prefetch", p.acfPrefixes, p.acfTargets); ok {
@@ -2941,4 +2974,74 @@ func trimPrefix(path, prefix string) string {
 		return "/" + out
 	}
 	return out
+}
+
+// stripTimestampFromSegment removes the timestamp suffix from APL segment filenames
+// Example: "apexgaming0007-1770464225.ts" -> "apexgaming0007.ts"
+func stripTimestampFromSegment(filename string) string {
+	// Check if filename has timestamp pattern: name-timestamp.ext
+	if !strings.Contains(filename, "-") {
+		return filename
+	}
+	
+	// Find the extension
+	extIdx := strings.LastIndex(filename, ".")
+	if extIdx < 0 {
+		return filename
+	}
+	
+	// Find the last dash before the extension
+	dashIdx := strings.LastIndex(filename[:extIdx], "-")
+	if dashIdx < 0 {
+		return filename
+	}
+	
+	// Check if what's after the dash is a timestamp (all digits)
+	timestampPart := filename[dashIdx+1 : extIdx]
+	for _, c := range timestampPart {
+		if c < '0' || c > '9' {
+			// Not a timestamp, return original
+			return filename
+		}
+	}
+	
+	// Strip the timestamp and return: prefix + extension
+	return filename[:dashIdx] + filename[extIdx:]
+}
+
+// addTimestampToSegment adds a timestamp suffix to segment filenames
+// Example: "apexgaming0007.ts" -> "apexgaming0007-1770464225.ts"
+func addTimestampToSegment(filename string) string {
+	// Find the extension
+	extIdx := strings.LastIndex(filename, ".")
+	if extIdx < 0 {
+		// No extension, append at the end
+		return fmt.Sprintf("%s-%d", filename, time.Now().Unix())
+	}
+	
+	// Insert timestamp before the extension
+	return fmt.Sprintf("%s-%d%s", filename[:extIdx], time.Now().Unix(), filename[extIdx:])
+}
+
+// transformAPLPlaylist adds timestamps to segment names in APL m3u8 playlists
+// This prevents issues when the origin stream rolls back
+func transformAPLPlaylist(body []byte) []byte {
+	lines := bytes.Split(body, []byte("\n"))
+	var result [][]byte
+	
+	for _, line := range lines {
+		lineStr := string(line)
+		trimmed := strings.TrimSpace(lineStr)
+		
+		// Check if this line is a segment (not a comment and ends with .ts or .mp4)
+		if !strings.HasPrefix(trimmed, "#") && trimmed != "" && isSegmentPath(trimmed) {
+			// Add timestamp to the segment filename
+			timestampedSegment := addTimestampToSegment(trimmed)
+			result = append(result, []byte(timestampedSegment))
+		} else {
+			result = append(result, line)
+		}
+	}
+	
+	return bytes.Join(result, []byte("\n"))
 }
