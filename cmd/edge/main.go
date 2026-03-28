@@ -3009,18 +3009,32 @@ func stripTimestampFromSegment(filename string) string {
 	return filename[:dashIdx] + filename[extIdx:]
 }
 
-// addTimestampToSegment adds a timestamp suffix to segment filenames
-// Example: "apexgaming0007.ts" -> "apexgaming0007-1770464225.ts"
+// addTimestampToSegment adds a stable hash-based suffix to segment filenames
+// The hash is based on the segment name itself, ensuring the same segment
+// always gets the same "timestamp" across playlist refreshes.
+// This prevents iOS Safari from breaking on playlist updates.
+// Example: "apexgaming0007.ts" -> "apexgaming0007-3456789012.ts"
 func addTimestampToSegment(filename string) string {
 	// Find the extension
 	extIdx := strings.LastIndex(filename, ".")
 	if extIdx < 0 {
-		// No extension, append at the end
-		return fmt.Sprintf("%s-%d", filename, time.Now().Unix())
+		// No extension, use simple hash of filename
+		hash := uint64(0)
+		for _, c := range filename {
+			hash = hash*31 + uint64(c)
+		}
+		return fmt.Sprintf("%s-%d", filename, hash%10000000000)
 	}
 	
-	// Insert timestamp before the extension
-	return fmt.Sprintf("%s-%d%s", filename[:extIdx], time.Now().Unix(), filename[extIdx:])
+	// Create a stable hash from the base filename (without extension)
+	base := filename[:extIdx]
+	hash := uint64(0)
+	for _, c := range base {
+		hash = hash*31 + uint64(c)
+	}
+	
+	// Insert stable hash before the extension
+	return fmt.Sprintf("%s-%d%s", base, hash%10000000000, filename[extIdx:])
 }
 
 // transformAPLPlaylist adds timestamps to segment names in APL m3u8 playlists

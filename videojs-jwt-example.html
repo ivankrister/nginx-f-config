@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video.js with JWT Authentication</title>
+    
+    <!-- Video.js CSS -->
+    <link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet" />
+    
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+        }
+        .auth-section {
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #f9f9f9;
+            border-radius: 4px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 14px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        .video-container {
+            margin-top: 30px;
+        }
+        #video-player {
+            width: 100%;
+            max-width: 100%;
+        }
+        .session-info {
+            margin-top: 15px;
+            padding: 10px;
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .code-block {
+            background: #f4f4f4;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            word-break: break-all;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎬 Video.js with JWT Authentication</h1>
+        
+        <div class="auth-section">
+            <h2>Step 1: Authentication</h2>
+            <p><strong>⚠️ Note:</strong> Sessions are <strong>ONE-TIME USE</strong>. Each session can only load one m3u8 file. To switch streams or reload, you must re-authenticate.</p>
+            <div class="form-group">
+                <label for="edge-url">Edge Proxy URL:</label>
+                <input type="text" id="edge-url" value="http://localhost:8080" placeholder="http://your-edge-proxy:8080">
+            </div>
+            <div class="form-group">
+                <label for="jwt-token">JWT Token:</label>
+                <input type="text" id="jwt-token" placeholder="Paste your JWT token here">
+            </div>
+            <div class="form-group">
+                <label for="stream-path">Stream Path:</label>
+                <input type="text" id="stream-path" value="/oryx/stream.m3u8" placeholder="/path/to/stream.m3u8">
+            </div>
+            <button id="auth-btn" onclick="authenticate()">🔐 Authenticate & Play Stream</button>
+            <div id="auth-status"></div>
+            <div id="session-info" class="session-info" style="display:none;"></div>
+        </div>
+
+        <div class="video-container">
+            <video id="video-player" class="video-js vjs-default-skin" controls preload="auto" width="640" height="360">
+                <p class="vjs-no-js">
+                    To view this video please enable JavaScript, and consider upgrading to a web browser that
+                    <a href="https://videojs.com/html5-video-support/" target="_blank">supports HTML5 video</a>
+                </p>
+            </video>
+        </div>
+    </div>
+
+    <!-- Video.js JavaScript -->
+    <script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>
+
+    <script>
+        let player;
+        let sessionId = null;
+        let streamUrl = null;
+
+        // Initialize Video.js player
+        document.addEventListener('DOMContentLoaded', function() {
+            player = videojs('video-player', {
+                controls: true,
+                autoplay: false,
+                preload: 'auto',
+                fluid: true,
+                html5: {
+                    vhs: {
+                        overrideNative: true
+                    }
+                }
+            });
+
+            player.on('error', function(e) {
+                const error = player.error();
+                let errorMsg = error.message || 'Unknown error';
+                
+                // Check if it might be an auth issue
+                if (error.code === 2 || error.code === 4) {
+                    errorMsg += ' (Possible auth issue - try re-authenticating)';
+                }
+                
+                showStatus('error', `Player Error: ${errorMsg}`);
+                console.error('Player error:', error);
+            });
+
+            player.on('loadstart', function() {
+                console.log('Loading stream...');
+            });
+
+            player.on('canplay', function() {
+                showStatus('success', '✅ Stream loaded successfully! Click play to watch.');
+            });
+        });
+
+        async function authenticate() {
+            const edgeUrl = document.getElementById('edge-url').value.trim();
+            const jwtToken = document.getElementById('jwt-token').value.trim();
+            const streamPath = document.getElementById('stream-path').value.trim();
+
+            if (!edgeUrl || !jwtToken || !streamPath) {
+                showStatus('error', 'Please fill in all fields');
+                return;
+            }
+
+            const authBtn = document.getElementById('auth-btn');
+            authBtn.disabled = true;
+            authBtn.textContent = '⏳ Authenticating...';
+            
+            try {
+                // Step 1: Validate JWT and get session ID
+                showStatus('info', 'Validating JWT token...');
+                
+                const authResponse = await fetch(`${edgeUrl}/auth/validate`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${jwtToken}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                if (!authResponse.ok) {
+                    const errorText = await authResponse.text();
+                    throw new Error(`Authentication failed: ${errorText}`);
+                }
+
+                const authData = await authResponse.json();
+                
+                if (!authData.success || !authData.session_id) {
+                    throw new Error('Invalid authentication response');
+                }
+
+                sessionId = authData.session_id;
+                const expiresIn = authData.expires_in;
+
+                showStatus('success', `✅ Authentication successful! Session expires in ${formatDuration(expiresIn)}`);
+                
+                // Show session info
+                displaySessionInfo(sessionId, expiresIn);
+
+                // Step 2: Load stream with session ID
+                streamUrl = `${edgeUrl}${streamPath}?session_id=${sessionId}`;
+                
+                showStatus('info', 'Loading stream...');
+                
+                player.src({
+                    src: streamUrl,
+                    type: 'application/x-mpegURL'
+                });
+
+                // Optional: Auto-play
+                // player.play();
+
+                authBtn.textContent = '✅ Authenticated - Stream Loaded';
+                
+                // Re-enable button for re-authentication
+                setTimeout(() => {
+                    authBtn.disabled = false;
+                    authBtn.textContent = '🔐 Re-Authenticate';
+                }, 2000);
+
+            } catch (error) {
+                console.error('Authentication error:', error);
+                showStatus('error', `❌ ${error.message}`);
+                authBtn.disabled = false;
+                authBtn.textContent = '🔐 Authenticate & Play Stream';
+            }
+        }
+
+        function showStatus(type, message) {
+            const statusDiv = document.getElementById('auth-status');
+            statusDiv.className = `status ${type}`;
+            statusDiv.textContent = message;
+            statusDiv.style.display = 'block';
+        }
+
+        function displaySessionInfo(sessionId, expiresIn) {
+            const sessionInfoDiv = document.getElementById('session-info');
+            const expiryTime = new Date(Date.now() + expiresIn * 1000);
+            
+            sessionInfoDiv.innerHTML = `
+                <strong>Session Active</strong><br>
+                <div class="code-block">Session ID: ${sessionId.substring(0, 40)}...</div>
+                <small>Expires: ${expiryTime.toLocaleString()}</small>
+            `;
+            sessionInfoDiv.style.display = 'block';
+        }
+
+        function formatDuration(seconds) {
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            
+            if (hours > 0) {
+                return `${hours}h ${minutes}m`;
+            }
+            return `${minutes}m`;
+        }
+
+        // Handle session expiry
+        function setupSessionRefresh(sessionId, expiresIn) {
+            // Refresh session before expiry (e.g., 5 minutes before)
+            const refreshTime = (expiresIn - 300) * 1000; // 5 minutes before
+            
+            if (refreshTime > 0) {
+                setTimeout(() => {
+                    showStatus('info', '⚠️ Session expiring soon. Please re-authenticate.');
+                }, refreshTime);
+            }
+        }
+
+        // Example: Programmatic usage (for integration with your app)
+        async function playStreamProgrammatically(edgeUrl, jwtToken, streamPath) {
+            try {
+                // Get session
+                const authResponse = await fetch(`${edgeUrl}/auth/validate`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${jwtToken}` }
+                });
+                
+                const { session_id } = await authResponse.json();
+                
+                // Load stream
+                const streamUrl = `${edgeUrl}${streamPath}?session_id=${session_id}`;
+                player.src({ src: streamUrl, type: 'application/x-mpegURL' });
+                player.play();
+                
+                return session_id;
+            } catch (error) {
+                console.error('Error:', error);
+                throw error;
+            }
+        }
+    </script>
+</body>
+</html>
