@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -16,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -830,14 +828,6 @@ func (m *metrics) getSnapshot() MetricsSnapshot {
 	// APL failure rate
 	aplFailureRate := calculateFailureRate(m.aplRequests.Load(), m.aplFailures.Load())
 
-	originStats := map[string]OriginMetrics{
-		"apl": {
-			Requests:    m.aplRequests.Load(),
-			Failures:    m.aplFailures.Load(),
-			FailureRate: aplFailureRate,
-		},
-	}
-
 	return MetricsSnapshot{
 		Timestamp:           time.Now(),
 		Uptime:              time.Since(m.startTime).String(),
@@ -857,7 +847,9 @@ func (m *metrics) getSnapshot() MetricsSnapshot {
 		OriginTimeouts:      m.originTimeouts.Load(),
 		OriginDNSErrors:     m.originDNSErrors.Load(),
 		OriginConnErrors:    m.originConnErrors.Load(),
-		OriginStats:         originStats,
+		APLRequests:         m.aplRequests.Load(),
+		APLFailures:         m.aplFailures.Load(),
+		APLFailureRate:      aplFailureRate,
 		AvgResponseTime:     m.avgResponseTime.Load(),
 		RequestCount:        m.requestCount.Load(),
 	}
@@ -1043,7 +1035,8 @@ func (p *edgeProxy) saveCertificate(target, cert, key string) (string, string, s
 	if err != nil {
 		return "", "", targetName, err
 	}
-	if err := os.MkdirAll(p.certStorageDir, 0o755); err != nil {
+	certDir := "/etc/nginx/keys"
+	if err := os.MkdirAll(certDir, 0o755); err != nil {
 		return "", "", targetName, fmt.Errorf("failed to prepare certificate directory: %w", err)
 	}
 
@@ -1062,11 +1055,12 @@ func (p *edgeProxy) saveCertificate(target, cert, key string) (string, string, s
 }
 
 func (p *edgeProxy) certPaths(target string) (string, string, string, error) {
+	certDir := "/etc/nginx/keys"
 	switch target {
 	case "", "default", "server", "primary":
-		return filepath.Join(p.certStorageDir, "server.crt"), filepath.Join(p.certStorageDir, "server.key"), "default", nil
+		return filepath.Join(certDir, "server.crt"), filepath.Join(certDir, "server.key"), "default", nil
 	case "apl":
-		return filepath.Join(p.certStorageDir, "apl.crt"), filepath.Join(p.certStorageDir, "apl.key"), "apl", nil
+		return filepath.Join(certDir, "apl.crt"), filepath.Join(certDir, "apl.key"), "apl", nil
 	default:
 		return "", "", target, fmt.Errorf("unsupported certificate target %q", target)
 	}
@@ -1083,21 +1077,9 @@ func ensureTrailingNewline(s string) string {
 }
 
 func (p *edgeProxy) authorizeCertUpload(w http.ResponseWriter, r *http.Request) bool {
-	if !p.certUploadEnabled {
-		http.NotFound(w, r)
-		return false
-	}
-	if p.certUploadUser == "" && p.certUploadPass == "" {
-		return true
-	}
-	user, pass, ok := r.BasicAuth()
-	if !ok || subtle.ConstantTimeCompare([]byte(user), []byte(p.certUploadUser)) != 1 ||
-		subtle.ConstantTimeCompare([]byte(pass), []byte(p.certUploadPass)) != 1 {
-		w.Header().Set("WWW-Authenticate", `Basic realm="ssl-upload"`)
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return false
-	}
-	return true
+	// Certificate upload disabled for simplified APL-only proxy
+	http.NotFound(w, r)
+	return false
 }
 
 // ServeCacheClear handles POST requests to clear the cache
@@ -1263,30 +1245,6 @@ func (p *edgeProxy) ServeCacheConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.playlistTTL.Store(dur.Nanoseconds())
-	}
-	if payload.PlaylistGraceSeconds != nil {
-		if *payload.PlaylistGraceSeconds < 0 {
-			http.Error(w, "playlist_grace_seconds cannot be negative", http.StatusBadRequest)
-			return
-		}
-		dur := time.Duration(*payload.PlaylistGraceSeconds * float64(time.Second))
-		p.playlistGrace.Store(dur.Nanoseconds())
-	}
-	if payload.WCCPlaylistTTLSeconds != nil {
-		dur := time.Duration(*payload.WCCPlaylistTTLSeconds * float64(time.Second))
-		if dur <= 0 {
-			http.Error(w, "wcc_playlist_ttl_seconds must be greater than zero", http.StatusBadRequest)
-			return
-		}
-		p.wccPlaylistTTL.Store(dur.Nanoseconds())
-	}
-	if payload.WCCPlaylistGraceSeconds != nil {
-		if *payload.WCCPlaylistGraceSeconds < 0 {
-			http.Error(w, "wcc_playlist_grace_seconds cannot be negative", http.StatusBadRequest)
-			return
-		}
-		dur := time.Duration(*payload.WCCPlaylistGraceSeconds * float64(time.Second))
-		p.wccPlaylistGrace.Store(dur.Nanoseconds())
 	}
 	if payload.SegmentTTLSeconds != nil {
 		dur := time.Duration(*payload.SegmentTTLSeconds * float64(time.Second))
@@ -1515,38 +1473,26 @@ func (p *edgeProxy) ttlForPath(path string) time.Duration {
 }
 
 func (p *edgeProxy) forwardHeaders(target *upstreamTarget) map[string]string {
-	var origin string
-	var referer string
-	if target != nil {
-		if target.refererHeader != "" {
-			referer = target.refererHeader
-		}
-		if target.originHeader != "" {
-			origin = target.originHeader
-		} else {
-			origin = originFromReferer(referer)
-		}
-	}
-	if origin == "" {
-		origin = p.primeOrigin
-	}
-	if referer == "" {
-		referer = p.primeReferer
-	}
 	headers := map[string]string{
 		"User-Agent":         p.userAgent,
-		"Origin":             origin,
-		"Referer":            referer,
 		"sec-ch-ua":          `"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"`,
 		"sec-ch-ua-mobile":   "?0",
 		"sec-ch-ua-platform": `"macOS"`,
 	}
+
+	if target != nil {
+		if target.originHeader != "" {
+			headers["Origin"] = target.originHeader
+		}
+		if target.refererHeader != "" {
+			headers["Referer"] = target.refererHeader
+		}
+	}
+
 	if target == p.aplTarget {
 		headers["Cookie"] = "JSESSIONID=853C565B76C69AF5EE8F8BE3D6AC13B0"
 	}
-	if target == p.wccTarget {
-		headers["Cookie"] = "JSESSIONID=E8D7CF0EA66945D405FD2EA87F55E7A7"
-	}
+
 	return headers
 }
 
@@ -2039,11 +1985,8 @@ func (p *edgeProxy) clearCacheKeys() {
 
 func (p *edgeProxy) cacheConfigSnapshot() map[string]float64 {
 	return map[string]float64{
-		"playlist_ttl_seconds":       float64(time.Duration(p.playlistTTL.Load())) / float64(time.Second),
-		"playlist_grace_seconds":     float64(time.Duration(p.playlistGrace.Load())) / float64(time.Second),
-		"wcc_playlist_ttl_seconds":   float64(time.Duration(p.wccPlaylistTTL.Load())) / float64(time.Second),
-		"wcc_playlist_grace_seconds": float64(time.Duration(p.wccPlaylistGrace.Load())) / float64(time.Second),
-		"segment_ttl_seconds":        float64(time.Duration(p.segmentTTL.Load())) / float64(time.Second),
+		"playlist_ttl_seconds": float64(time.Duration(p.playlistTTL.Load())) / float64(time.Second),
+		"segment_ttl_seconds":  float64(time.Duration(p.segmentTTL.Load())) / float64(time.Second),
 	}
 }
 
