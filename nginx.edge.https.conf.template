@@ -1,5 +1,3 @@
-ssl_dhparam /etc/nginx/keys/dhparam.pem;
-
 # Nginx proxy cache configuration
 proxy_cache_path /var/cache/nginx/hls_cache levels=1:2 keys_zone=hls_cache:100m max_size=10g inactive=24h use_temp_path=off;
 proxy_cache_path /var/cache/nginx/general_cache levels=1:2 keys_zone=general_cache:50m max_size=2g inactive=12h use_temp_path=off;
