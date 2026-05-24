@@ -38,9 +38,9 @@ server {
         add_header Content-Type text/plain;
     }
 
-    # APL HLS playlists - 1s cache
+    # APL HLS playlists - 5s cache
     location ~ /(.*\.(m3u8))$ {
-        proxy_pass http://edge_go_backend/apl/stream/streams/$1;
+        proxy_pass http://edge_go_backend/apl/$1;
         
         proxy_cache hls_cache;
         proxy_cache_key "$scheme$proxy_host$request_uri";
@@ -49,8 +49,9 @@ server {
         proxy_buffering on;
     }
     
+    # APL HLS segments - 30s cache
     location ~ /(.*\.(ts))$ {
-        proxy_pass http://edge_go_backend/apl/stream/streams/$1;
+        proxy_pass http://edge_go_backend/apl/$1;
         
         proxy_cache hls_cache;
         proxy_cache_key "$scheme$proxy_host$request_uri";

@@ -50,21 +50,35 @@ server {
         add_header Content-Type text/plain;
     }
 
-     location /bestdashboard {
+    location /bestdashboard {
         proxy_pass http://edge_go_backend/dashboard;
         proxy_buffering off;
     }
 
-
-    location = /apl {
-        return 403;
-    }
-
-    location ^~ /apl/ {
-        return 403;
-    }
     location /dashboard/ {
         return 403;
+    }
+
+    # APL HLS playlists - 5s cache
+    location ~ ^/(.*\.m3u8)$ {
+        proxy_pass http://edge_go_backend/apl/$1;
+        
+        proxy_cache hls_cache;
+        proxy_cache_key "$scheme$proxy_host$request_uri";
+        proxy_cache_valid 200 5s;
+        proxy_cache_use_stale error timeout updating;
+        proxy_buffering on;
+    }
+    
+    # APL HLS segments - 30s cache
+    location ~ ^/(.*\.ts)$ {
+        proxy_pass http://edge_go_backend/apl/$1;
+        
+        proxy_cache hls_cache;
+        proxy_cache_key "$scheme$proxy_host$request_uri";
+        proxy_cache_valid 200 30s;
+        proxy_cache_use_stale error timeout updating;
+        proxy_buffering on;
     }
 
     location / {
@@ -104,7 +118,7 @@ server {
 
     # APL playlists - 5s cache
     location ~ ^/(.*\.m3u8)$ {
-        proxy_pass http://edge_go_backend/apl/stream/streams/$1;
+        proxy_pass http://edge_go_backend/apl/$1;
         
         proxy_cache hls_cache;
         proxy_cache_key "$scheme$proxy_host$request_uri";
@@ -115,7 +129,7 @@ server {
     
     # APL segments - 30s cache
     location ~ ^/(.*\.ts)$ {
-        proxy_pass http://edge_go_backend/apl/stream/streams/$1;
+        proxy_pass http://edge_go_backend/apl/$1;
         
         proxy_cache hls_cache;
         proxy_cache_key "$scheme$proxy_host$request_uri";
