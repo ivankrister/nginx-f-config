@@ -110,7 +110,7 @@ services:
       - DHPARAM_BITS=${DHPARAM_BITS:-2048}
     ports:
       - "8080:80"
-      - "8443:443"
+      - "443:443"
     volumes:
       - ./keys:/etc/nginx/keys
       - ./cache/nginx:/var/cache/nginx
