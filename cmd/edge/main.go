@@ -41,30 +41,16 @@ type metrics struct {
 	prefetchFailures  atomic.Uint64
 	prefetchActive    atomic.Int64
 
-	// Origin request metrics
+	// Origin request metrics (APL only)
 	originRequests   atomic.Uint64
 	originFailures   atomic.Uint64
 	originTimeouts   atomic.Uint64
 	originDNSErrors  atomic.Uint64
 	originConnErrors atomic.Uint64
 
-	// Request metrics by origin type
-	oryxRequests  atomic.Uint64
-	oryxFailures  atomic.Uint64
-	peryaRequests atomic.Uint64
-	peryaFailures atomic.Uint64
-	svRequests    atomic.Uint64
-	svFailures    atomic.Uint64
-	suRequests    atomic.Uint64
-	suFailures    atomic.Uint64
-	acfRequests   atomic.Uint64
-	acfFailures   atomic.Uint64
-	wccRequests   atomic.Uint64
-	wccFailures   atomic.Uint64
-	ukRequests    atomic.Uint64
-	ukFailures    atomic.Uint64
-	aplRequests   atomic.Uint64
-	aplFailures   atomic.Uint64
+	// APL request metrics
+	aplRequests atomic.Uint64
+	aplFailures atomic.Uint64
 
 	// Performance metrics
 	avgResponseTime atomic.Uint64 // in milliseconds
@@ -93,7 +79,7 @@ type MetricsSnapshot struct {
 	PrefetchSuccessRate float64 `json:"prefetch_success_rate"`
 	PrefetchActive      int64   `json:"prefetch_active"`
 
-	// Origin request metrics
+	// Origin request metrics (APL only)
 	OriginRequests    uint64  `json:"origin_requests"`
 	OriginFailures    uint64  `json:"origin_failures"`
 	OriginFailureRate float64 `json:"origin_failure_rate"`
@@ -101,18 +87,14 @@ type MetricsSnapshot struct {
 	OriginDNSErrors   uint64  `json:"origin_dns_errors"`
 	OriginConnErrors  uint64  `json:"origin_conn_errors"`
 
-	// Origin-specific metrics
-	OriginStats map[string]OriginMetrics `json:"origin_stats"`
+	// APL-specific metrics
+	APLRequests    uint64  `json:"apl_requests"`
+	APLFailures    uint64  `json:"apl_failures"`
+	APLFailureRate float64 `json:"apl_failure_rate"`
 
 	// Performance metrics
 	AvgResponseTime uint64 `json:"avg_response_time_ms"`
 	RequestCount    uint64 `json:"request_count"`
-}
-
-type OriginMetrics struct {
-	Requests    uint64  `json:"requests"`
-	Failures    uint64  `json:"failures"`
-	FailureRate float64 `json:"failure_rate"`
 }
 
 func newMetrics() *metrics {
@@ -145,21 +127,7 @@ func (m *metrics) reset() {
 	m.originDNSErrors.Store(0)
 	m.originConnErrors.Store(0)
 
-	// Reset request metrics by origin type
-	m.oryxRequests.Store(0)
-	m.oryxFailures.Store(0)
-	m.peryaRequests.Store(0)
-	m.peryaFailures.Store(0)
-	m.svRequests.Store(0)
-	m.svFailures.Store(0)
-	m.suRequests.Store(0)
-	m.suFailures.Store(0)
-	m.acfRequests.Store(0)
-	m.acfFailures.Store(0)
-	m.wccRequests.Store(0)
-	m.wccFailures.Store(0)
-	m.ukRequests.Store(0)
-	m.ukFailures.Store(0)
+	// Reset APL request metrics
 	m.aplRequests.Store(0)
 	m.aplFailures.Store(0)
 
@@ -218,7 +186,7 @@ func main() {
 		proxy.startDailyMetricsReset(cfg.MetricsResetTime)
 	}
 
-	log.Printf("edge proxy listening on %s (oryx=%v, perya=%s, sv=%v, su=%v, acf=%v, wcc=%s, uk=%s)", cfg.ListenAddr, cfg.OryxOrigins, cfg.PeryaOrigin, listOriginNames(cfg.SVNamedOrigins), listOriginNames(cfg.SUOrigins), listOriginNames(cfg.ACFOrigins), cfg.WCCOrigin, cfg.UKOrigin)
+	log.Printf("edge proxy listening on %s (apl=%s)", cfg.ListenAddr, cfg.APLOrigin)
 	log.Printf("metrics endpoint available at %s/metrics", cfg.ListenAddr)
 	log.Printf("dashboard available at %s/dashboard", cfg.ListenAddr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -227,50 +195,18 @@ func main() {
 }
 
 type config struct {
-	ListenAddr         string
-	OryxOrigins        []string
-	OryxSkipTLSVerify  bool
-	PeryaOrigin        string
-	PeryaSkipTLSVerify bool
-	SVOrigin           string
-	SVHost             string
-	SVNamedOrigins     map[string]originConfig
-	SVReferer          string
-	SUOrigins          map[string]originConfig
-	SUReferer          string
-	SUSkipTLSVerify    bool
-	ACFOrigins         map[string]originConfig
-	ACFReferer         string
-	APLOrigin          string
-	WCCOrigin          string
-	WCCHost            string
-	WCCReferer         string
-	WCCSkipTLSVerify   bool
-	WCCPlaylistTTL     time.Duration
-	WCCPlaylistGrace   time.Duration
-	UKOrigin           string
-	UKHost             string
-	UKReferer          string
-	UKSkipTLSVerify    bool
-	PrimeHost          string
-	PrimeOrigin        string
-	PrimeReferer       string
-	DisableTLSVerify   bool
-	UpstreamTimeout    time.Duration
-	UpstreamUserAgent  string
-	CacheEntries       int
-	PlaylistTTL        time.Duration
-	SegmentTTL         time.Duration
-	PlaylistGrace      time.Duration
-	PrefetchWorkers    int
-	PrefetchBatch      int
-	PrefetchEnabled    bool
-	MetricsResetDaily  bool
-	MetricsResetTime   string // Format: "HH:MM" (e.g., "00:00" for midnight)
-	CertStorageDir     string
-	CertUploadEnabled  bool
-	CertUploadUser     string
-	CertUploadPassword string
+	ListenAddr        string
+	APLOrigin         string
+	UpstreamTimeout   time.Duration
+	UpstreamUserAgent string
+	CacheEntries      int
+	PlaylistTTL       time.Duration
+	SegmentTTL        time.Duration
+	PrefetchWorkers   int
+	PrefetchBatch     int
+	PrefetchEnabled   bool
+	MetricsResetDaily bool
+	MetricsResetTime  string // Format: "HH:MM" (e.g., "00:00" for midnight)
 }
 
 type upstreamTarget struct {
@@ -305,67 +241,10 @@ func loadConfig() (*config, error) {
 		return def
 	}
 
-	parseOrigins := func(vars ...string) []string {
-		var out []string
-		for _, v := range vars {
-			if val := strings.TrimSpace(os.Getenv(v)); val != "" {
-				out = append(out, val)
-			}
-		}
-		return out
-	}
-
-	oryxOrigins := parseOrigins("ORYX_SERVER", "ORYX_SERVER2")
-	if len(oryxOrigins) == 0 {
-		return nil, errors.New("at least one ORYX_SERVER is required")
-	}
-	oryxSkipVerify, err := parseBoolEnv("ORYX_SKIP_TLS_VERIFY", false)
-	if err != nil {
-		return nil, err
-	}
-
-	perya := strings.TrimSpace(os.Getenv("PERYA_SERVER"))
-	if perya == "" {
-		return nil, errors.New("PERYA_SERVER is required")
-	}
-	peryaSkipVerify, err := parseBoolEnv("PERYA_SKIP_TLS_VERIFY", false)
-	if err != nil {
-		return nil, err
-	}
-
-	svOrigin := strings.TrimSpace(os.Getenv("SV_ORIGIN"))
-	svHost := strings.TrimSpace(os.Getenv("SV_HOST_HEADER"))
-	suReferer := strings.TrimSpace(os.Getenv("SU_REFERER"))
-	svReferer := strings.TrimSpace(os.Getenv("SV_REFERER"))
-	if svReferer == "" {
-		svReferer = suReferer
-	}
-	suSkipVerify, err := parseBoolEnv("SU_SKIP_TLS_VERIFY", false)
-	if err != nil {
-		return nil, err
-	}
-	suOrigins := collectSUOrigins(suReferer)
-	acfReferer := strings.TrimSpace(os.Getenv("ACF_REFERER"))
-	acfOrigins := collectACFOriginsWithDefault(acfReferer)
 	aplOrigin := strings.TrimSpace(os.Getenv("APL_ORIGIN"))
-	wccOrigin := strings.TrimSpace(os.Getenv("WCC_ORIGIN"))
-	wccHost := strings.TrimSpace(os.Getenv("WCC_HOST_HEADER"))
-	wccReferer := strings.TrimSpace(os.Getenv("WCC_REFERER"))
-	if wccReferer == "" {
-		wccReferer = "https://stream.wccgames7.xyz/"
+	if aplOrigin == "" {
+		return nil, errors.New("APL_ORIGIN is required")
 	}
-	wccSkipVerify, err := parseBoolEnv("WCC_SKIP_TLS_VERIFY", true)
-	if err != nil {
-		return nil, err
-	}
-	ukOrigin := strings.TrimSpace(os.Getenv("UK_ORIGIN"))
-	ukHost := strings.TrimSpace(os.Getenv("UK_HOST_HEADER"))
-	ukReferer := strings.TrimSpace(os.Getenv("UK_REFERER"))
-	ukSkipVerify, err := parseBoolEnv("UK_SKIP_TLS_VERIFY", false)
-	if err != nil {
-		return nil, err
-	}
-	svNamedOrigins := collectSVOrigins(svOrigin, svHost, svReferer)
 
 	timeout := 5 * time.Second
 	if raw := strings.TrimSpace(os.Getenv("UPSTREAM_TIMEOUT")); raw != "" {
@@ -376,15 +255,6 @@ func loadConfig() (*config, error) {
 		timeout = dur
 	}
 
-	disableTLS := false
-	if raw := strings.TrimSpace(os.Getenv("DISABLE_TLS_VERIFY")); raw != "" {
-		val, err := strconv.ParseBool(raw)
-		if err != nil {
-			return nil, fmt.Errorf("invalid DISABLE_TLS_VERIFY: %w", err)
-		}
-		disableTLS = val
-	}
-
 	cacheEntries, err := parseIntEnv("CACHE_SIZE", 512)
 	if err != nil {
 		return nil, err
@@ -393,45 +263,6 @@ func loadConfig() (*config, error) {
 	playlistTTL, err := parseDurationEnv("CACHE_TTL_PLAYLIST", 2*time.Second)
 	if err != nil {
 		return nil, err
-	}
-
-	wccPlaylistTTL := playlistTTL
-	playlistGrace := time.Duration(0)
-	if raw := strings.TrimSpace(os.Getenv("CACHE_FLEXIBLE")); raw != "" {
-		parts := strings.Split(raw, ",")
-		if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
-			sec, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-			if err != nil || sec <= 0 {
-				return nil, fmt.Errorf("invalid CACHE_FLEXIBLE primary ttl: %w", err)
-			}
-			playlistTTL = time.Duration(sec) * time.Second
-		}
-		if len(parts) > 1 && strings.TrimSpace(parts[1]) != "" {
-			sec, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-			if err != nil || sec < 0 {
-				return nil, fmt.Errorf("invalid CACHE_FLEXIBLE grace ttl: %w", err)
-			}
-			playlistGrace = time.Duration(sec) * time.Second
-		}
-	}
-
-	wccPlaylistGrace := playlistGrace
-	if raw := strings.TrimSpace(os.Getenv("WCC_CACHE_FLEXIBLE")); raw != "" {
-		parts := strings.Split(raw, ",")
-		if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
-			sec, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-			if err != nil || sec <= 0 {
-				return nil, fmt.Errorf("invalid WCC_CACHE_FLEXIBLE primary ttl: %w", err)
-			}
-			wccPlaylistTTL = time.Duration(sec) * time.Second
-		}
-		if len(parts) > 1 && strings.TrimSpace(parts[1]) != "" {
-			sec, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-			if err != nil || sec < 0 {
-				return nil, fmt.Errorf("invalid WCC_CACHE_FLEXIBLE grace ttl: %w", err)
-			}
-			wccPlaylistGrace = time.Duration(sec) * time.Second
-		}
 	}
 
 	segmentTTL, err := parseDurationEnv("CACHE_TTL_SEGMENT", 30*time.Second)
@@ -474,63 +305,19 @@ func loadConfig() (*config, error) {
 		return nil, fmt.Errorf("invalid METRICS_RESET_TIME format (use HH:MM): %w", err)
 	}
 
-	certStorageDir := getenv("CERT_STORAGE_DIR", "keys")
-	certUploadEnabled := true
-	if raw := strings.TrimSpace(os.Getenv("CERT_UPLOAD_ENABLED")); raw != "" {
-		val, err := strconv.ParseBool(raw)
-		if err != nil {
-			return nil, fmt.Errorf("invalid CERT_UPLOAD_ENABLED: %w", err)
-		}
-		certUploadEnabled = val
-	}
-	certUploadUser := strings.TrimSpace(os.Getenv("CERT_UPLOAD_USER"))
-	certUploadPass := strings.TrimSpace(os.Getenv("CERT_UPLOAD_PASSWORD"))
-
 	return &config{
-		ListenAddr:         getenv("LISTEN_ADDR", ":9000"),
-		OryxOrigins:        oryxOrigins,
-		OryxSkipTLSVerify:  oryxSkipVerify,
-		PeryaOrigin:        perya,
-		PeryaSkipTLSVerify: peryaSkipVerify,
-		SVOrigin:           svOrigin,
-		SVHost:             svHost,
-		SVNamedOrigins:     svNamedOrigins,
-		SVReferer:          svReferer,
-		SUOrigins:          suOrigins,
-		SUReferer:          suReferer,
-		SUSkipTLSVerify:    suSkipVerify,
-		ACFOrigins:         acfOrigins,
-		ACFReferer:         acfReferer,
-		APLOrigin:          aplOrigin,
-		WCCOrigin:          wccOrigin,
-		WCCHost:            wccHost,
-		WCCReferer:         wccReferer,
-		WCCSkipTLSVerify:   wccSkipVerify,
-		UKOrigin:           ukOrigin,
-		UKHost:             ukHost,
-		UKReferer:          ukReferer,
-		UKSkipTLSVerify:    ukSkipVerify,
-		PrimeHost:          getenv("PRIME_STREAM_HOST", ""),
-		PrimeOrigin:        getenv("PRIME_STREAM_ORIGIN", ""),
-		PrimeReferer:       getenv("PRIME_STREAM_REFERER", ""),
-		DisableTLSVerify:   disableTLS,
-		UpstreamTimeout:    timeout,
-		UpstreamUserAgent:  getenv("EDGE_USER_AGENT", defaultUserAgent),
-		CacheEntries:       cacheEntries,
-		PlaylistTTL:        playlistTTL,
-		PlaylistGrace:      playlistGrace,
-		WCCPlaylistTTL:     wccPlaylistTTL,
-		WCCPlaylistGrace:   wccPlaylistGrace,
-		SegmentTTL:         segmentTTL,
-		PrefetchWorkers:    prefetchWorkers,
-		PrefetchBatch:      prefetchBatch,
-		PrefetchEnabled:    prefetchEnabled,
-		MetricsResetDaily:  metricsResetDaily,
-		MetricsResetTime:   metricsResetTime,
-		CertStorageDir:     certStorageDir,
-		CertUploadEnabled:  certUploadEnabled,
-		CertUploadUser:     certUploadUser,
-		CertUploadPassword: certUploadPass,
+		ListenAddr:        getenv("LISTEN_ADDR", ":9000"),
+		APLOrigin:         aplOrigin,
+		UpstreamTimeout:   timeout,
+		UpstreamUserAgent: getenv("EDGE_USER_AGENT", defaultUserAgent),
+		CacheEntries:      cacheEntries,
+		PlaylistTTL:       playlistTTL,
+		SegmentTTL:        segmentTTL,
+		PrefetchWorkers:   prefetchWorkers,
+		PrefetchBatch:     prefetchBatch,
+		PrefetchEnabled:   prefetchEnabled,
+		MetricsResetDaily: metricsResetDaily,
+		MetricsResetTime:  metricsResetTime,
 	}, nil
 }
 
@@ -579,44 +366,21 @@ func parseBoolEnv(key string, def bool) (bool, error) {
 const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
 type edgeProxy struct {
-	clientStrict      *http.Client
-	clientInsecure    *http.Client
-	oryxTargets       []*upstreamTarget
-	oryxNamed         map[string]*upstreamTarget
-	oryxPrefixes      []string
-	peryaTarget       *upstreamTarget
-	svTargets         map[string]*upstreamTarget
-	svPrefixes        []string
-	suTargets         map[string]*upstreamTarget
-	suPrefixes        []string
-	acfTargets        map[string]*upstreamTarget
-	acfPrefixes       []string
-	aplTarget         *upstreamTarget
-	wccTarget         *upstreamTarget
-	ukTarget          *upstreamTarget
-	primeOrigin       string
-	primeReferer      string
-	userAgent         string
-	certStorageDir    string
-	certUploadEnabled bool
-	certUploadUser    string
-	certUploadPass    string
-	oryxCounter       atomic.Uint64
-	upstreamDelay     time.Duration
-	cache             *ristretto.Cache
-	cacheOn           atomic.Bool
-	cacheKeys         *sync.Map
-	cacheHashIndex    *sync.Map
-	playlistTTL       atomic.Int64
-	playlistGrace     atomic.Int64
-	wccPlaylistTTL    atomic.Int64
-	wccPlaylistGrace  atomic.Int64
-	segmentTTL        atomic.Int64
-	prefetchBatch     int
-	prefetchSem       chan struct{}
-	prefetchOn        bool
-	metrics           *metrics
-	revalidateMap     sync.Map
+	clientStrict   *http.Client
+	aplTarget      *upstreamTarget
+	userAgent      string
+	upstreamDelay  time.Duration
+	cache          *ristretto.Cache
+	cacheOn        atomic.Bool
+	cacheKeys      *sync.Map
+	cacheHashIndex *sync.Map
+	playlistTTL    atomic.Int64
+	segmentTTL     atomic.Int64
+	prefetchBatch  int
+	prefetchSem    chan struct{}
+	prefetchOn     bool
+	metrics        *metrics
+	revalidateMap  sync.Map
 }
 
 func newEdgeProxy(cfg *config) (*edgeProxy, error) {
@@ -675,121 +439,17 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 		metrics.cacheSize.Add(^uint64(n - 1)) // subtract n
 	}
 
-	var oryxTargets []*upstreamTarget
-	var oryxNamed map[string]*upstreamTarget
-	var oryxPrefixes []string
-	for idx, origin := range cfg.OryxOrigins {
-		u, err := buildURL(origin)
-		if err != nil {
-			return nil, fmt.Errorf("invalid ORYX origin %q: %w", origin, err)
-		}
-		target := buildTarget(u, cfg.PrimeHost, "", "", cfg.OryxSkipTLSVerify)
-		oryxTargets = append(oryxTargets, target)
-		if oryxNamed == nil {
-			oryxNamed = make(map[string]*upstreamTarget, len(cfg.OryxOrigins))
-		}
-		name := fmt.Sprintf("ps%d", idx+1)
-		oryxNamed[name] = target
-		oryxPrefixes = append(oryxPrefixes, name)
-	}
-	sortNamedPrefixes(oryxPrefixes)
-
-	peryaURL, err := buildURL(cfg.PeryaOrigin)
+	// Build APL target
+	aplURL, err := buildURL(cfg.APLOrigin)
 	if err != nil {
-		return nil, fmt.Errorf("invalid PERYA origin: %w", err)
+		return nil, fmt.Errorf("invalid APL origin: %w", err)
 	}
-	peryaTarget := buildTarget(peryaURL, cfg.PrimeHost, "", "", cfg.PeryaSkipTLSVerify)
+	aplTarget := buildTarget(aplURL, "", "", "", false)
 
-	var svTargets map[string]*upstreamTarget
-	var svPrefixes []string
-	if len(cfg.SVNamedOrigins) > 0 {
-		svTargets = make(map[string]*upstreamTarget, len(cfg.SVNamedOrigins))
-		for name, spec := range cfg.SVNamedOrigins {
-			svURL, err := buildURL(spec.Origin)
-			if err != nil {
-				return nil, fmt.Errorf("invalid SV origin %s: %w", name, err)
-			}
-			referer := spec.Referer
-			if referer == "" {
-				referer = cfg.SVReferer
-			}
-			svTargets[name] = buildTarget(svURL, spec.Host, "", referer, false)
-			svPrefixes = append(svPrefixes, name)
-		}
-		sortNamedPrefixes(svPrefixes)
-	}
-
-	var suTargets map[string]*upstreamTarget
-	var suPrefixes []string
-	if len(cfg.SUOrigins) > 0 {
-		suTargets = make(map[string]*upstreamTarget, len(cfg.SUOrigins))
-		for name, spec := range cfg.SUOrigins {
-			suURL, err := buildURL(spec.Origin)
-			if err != nil {
-				return nil, fmt.Errorf("invalid SU origin %s: %w", name, err)
-			}
-			referer := spec.Referer
-			if referer == "" {
-				referer = cfg.SUReferer
-			}
-			suTargets[name] = buildTarget(suURL, spec.Host, "", referer, cfg.SUSkipTLSVerify)
-			suPrefixes = append(suPrefixes, name)
-		}
-		sortNamedPrefixes(suPrefixes)
-	}
-
-	var acfTargets map[string]*upstreamTarget
-	var acfPrefixes []string
-	if len(cfg.ACFOrigins) > 0 {
-		acfTargets = make(map[string]*upstreamTarget, len(cfg.ACFOrigins))
-		for name, spec := range cfg.ACFOrigins {
-			acfURL, err := buildURL(spec.Origin)
-			if err != nil {
-				return nil, fmt.Errorf("invalid ACF origin %s: %w", name, err)
-			}
-			acfTargets[name] = buildTarget(acfURL, spec.Host, "", spec.Referer, false)
-			acfPrefixes = append(acfPrefixes, name)
-		}
-		sortNamedPrefixes(acfPrefixes)
-	}
-
-	var aplTarget *upstreamTarget
-	if cfg.APLOrigin != "" {
-		aplURL, err := buildURL(cfg.APLOrigin)
-		if err != nil {
-			return nil, fmt.Errorf("invalid APL origin: %w", err)
-		}
-		aplTarget = buildTarget(aplURL, "", "", "", false)
-	}
-
-	var wccTarget *upstreamTarget
-	if cfg.WCCOrigin != "" {
-		wccURL, err := buildURL(cfg.WCCOrigin)
-		if err != nil {
-			return nil, fmt.Errorf("invalid WCC origin: %w", err)
-		}
-		wccTarget = buildTarget(wccURL, cfg.WCCHost, "", cfg.WCCReferer, cfg.WCCSkipTLSVerify)
-	}
-
-	var ukTarget *upstreamTarget
-	if cfg.UKOrigin != "" {
-		ukURL, err := buildURL(cfg.UKOrigin)
-		if err != nil {
-			return nil, fmt.Errorf("invalid UK origin: %w", err)
-		}
-		ukTarget = buildTarget(ukURL, cfg.UKHost, "", cfg.UKReferer, cfg.UKSkipTLSVerify)
-	}
-	strictTransport := buildTransport(cfg.DisableTLSVerify)
+	// Create HTTP client
 	clientStrict := &http.Client{
-		Transport: strictTransport,
+		Transport: buildTransport(false),
 		Timeout:   cfg.UpstreamTimeout,
-	}
-	clientInsecure := clientStrict
-	if !cfg.DisableTLSVerify {
-		clientInsecure = &http.Client{
-			Transport: buildTransport(true),
-			Timeout:   cfg.UpstreamTimeout,
-		}
 	}
 
 	var cache *ristretto.Cache
@@ -833,42 +493,21 @@ func newEdgeProxy(cfg *config) (*edgeProxy, error) {
 	}
 
 	proxy := &edgeProxy{
-		clientStrict:      clientStrict,
-		clientInsecure:    clientInsecure,
-		oryxTargets:       oryxTargets,
-		oryxNamed:         oryxNamed,
-		oryxPrefixes:      oryxPrefixes,
-		peryaTarget:       peryaTarget,
-		svTargets:         svTargets,
-		svPrefixes:        svPrefixes,
-		suTargets:         suTargets,
-		suPrefixes:        suPrefixes,
-		acfTargets:        acfTargets,
-		acfPrefixes:       acfPrefixes,
-		aplTarget:         aplTarget,
-		wccTarget:         wccTarget,
-		ukTarget:          ukTarget,
-		primeOrigin:       cfg.PrimeOrigin,
-		primeReferer:      cfg.PrimeReferer,
-		userAgent:         cfg.UpstreamUserAgent,
-		certStorageDir:    cfg.CertStorageDir,
-		certUploadEnabled: cfg.CertUploadEnabled,
-		certUploadUser:    cfg.CertUploadUser,
-		certUploadPass:    cfg.CertUploadPassword,
-		upstreamDelay:     cfg.UpstreamTimeout,
-		cache:             cache,
-		cacheKeys:         cacheKeys,
-		cacheHashIndex:    cacheHashIndex,
-		prefetchBatch:     cfg.PrefetchBatch,
-		prefetchSem:       prefetchSem,
-		prefetchOn:        cfg.PrefetchEnabled && cfg.PrefetchWorkers > 0 && cfg.PrefetchBatch > 0,
-		metrics:           metrics,
+		clientStrict:   clientStrict,
+		aplTarget:      aplTarget,
+		userAgent:      cfg.UpstreamUserAgent,
+		upstreamDelay:  cfg.UpstreamTimeout,
+		cache:          cache,
+		cacheKeys:      cacheKeys,
+		cacheHashIndex: cacheHashIndex,
+		prefetchBatch:  cfg.PrefetchBatch,
+		prefetchSem:    prefetchSem,
+		prefetchOn:     cfg.PrefetchEnabled && cfg.PrefetchWorkers > 0 && cfg.PrefetchBatch > 0,
+		metrics:        metrics,
 	}
 
 	proxy.playlistTTL.Store(cfg.PlaylistTTL.Nanoseconds())
-	proxy.playlistGrace.Store(cfg.PlaylistGrace.Nanoseconds())
-	proxy.wccPlaylistTTL.Store(cfg.WCCPlaylistTTL.Nanoseconds())
-	proxy.wccPlaylistGrace.Store(cfg.WCCPlaylistGrace.Nanoseconds())
+	proxy.segmentTTL.Store(cfg.SegmentTTL.Nanoseconds())
 	proxy.segmentTTL.Store(cfg.SegmentTTL.Nanoseconds())
 	proxy.cacheOn.Store(cache != nil)
 
@@ -957,27 +596,6 @@ func (p *edgeProxy) fetchAndStore(ctx context.Context, reqURL *url.URL, target *
 		return nil, err
 	}
 
-	if target == p.wccTarget && resp != nil && resp.status == 525 {
-		// Retry once to smooth over transient TLS issues at the origin.
-		if ctx.Err() == nil {
-			log.Printf("wcc origin returned 525 for %s, retrying once", reqURL.Redacted())
-			if retryResp, retryErr := p.fetchFromOrigin(ctx, reqURL, target); retryErr == nil {
-				resp = retryResp
-			}
-		}
-
-		// Serve stale cache if retry also hit 525 (prevents visible errors).
-		if resp != nil && resp.status == 525 {
-			if cached, prefetchedEntry, ok, _ := p.getFromCache(cacheKeyForURL(reqURL)); ok {
-				header := cloneHeader(cached.header)
-				header.Set("X-Go-Cache", "STALE")
-				header.Set("X-Go-Prefetch", boolToPrefetch(prefetchedEntry))
-				header.Set("X-Go-Fallback", "wcc-stale-cache")
-				return &cachedResponse{status: cached.status, header: header, body: cached.body}, nil
-			}
-		}
-	}
-
 	// Serve stale playlist/segment on 5xx responses if available.
 	if (isPlaylistPath(reqURL.Path) || isSegmentPath(reqURL.Path)) && resp != nil && resp.status >= 500 {
 		if cached, prefetchedEntry, ok, _ := p.getFromCache(cacheKeyForURL(reqURL)); ok {
@@ -997,11 +615,6 @@ func (p *edgeProxy) fetchAndStore(ctx context.Context, reqURL *url.URL, target *
 	grace := time.Duration(0)
 	if isPlaylistPath(reqURL.Path) {
 		ttl = time.Duration(p.playlistTTL.Load())
-		grace = time.Duration(p.playlistGrace.Load())
-		if target == p.wccTarget {
-			ttl = time.Duration(p.wccPlaylistTTL.Load())
-			grace = time.Duration(p.wccPlaylistGrace.Load())
-		}
 	}
 
 	p.storeCacheEntry(reqURL, resp, prefetched, ttl, grace)
@@ -1044,9 +657,6 @@ func (p *edgeProxy) fetchFromOrigin(ctx context.Context, reqURL *url.URL, target
 	}
 
 	client := p.clientStrict
-	if target.skipTLSVerify && p.clientInsecure != nil {
-		client = p.clientInsecure
-	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1168,22 +778,7 @@ func (p *edgeProxy) incrementOriginRequest(target *upstreamTarget) {
 		return
 	}
 
-	switch {
-	case p.isOryxTarget(target):
-		p.metrics.oryxRequests.Add(1)
-	case target == p.peryaTarget:
-		p.metrics.peryaRequests.Add(1)
-	case p.isSVTarget(target):
-		p.metrics.svRequests.Add(1)
-	case p.isSUTarget(target):
-		p.metrics.suRequests.Add(1)
-	case p.isACFTarget(target):
-		p.metrics.acfRequests.Add(1)
-	case target == p.wccTarget:
-		p.metrics.wccRequests.Add(1)
-	case target == p.ukTarget:
-		p.metrics.ukRequests.Add(1)
-	case target == p.aplTarget:
+	if target == p.aplTarget {
 		p.metrics.aplRequests.Add(1)
 	}
 }
@@ -1194,62 +789,12 @@ func (p *edgeProxy) incrementOriginFailure(target *upstreamTarget) {
 		return
 	}
 
-	switch {
-	case p.isOryxTarget(target):
-		p.metrics.oryxFailures.Add(1)
-	case target == p.peryaTarget:
-		p.metrics.peryaFailures.Add(1)
-	case p.isSVTarget(target):
-		p.metrics.svFailures.Add(1)
-	case p.isSUTarget(target):
-		p.metrics.suFailures.Add(1)
-	case p.isACFTarget(target):
-		p.metrics.acfFailures.Add(1)
-	case target == p.wccTarget:
-		p.metrics.wccFailures.Add(1)
-	case target == p.ukTarget:
-		p.metrics.ukFailures.Add(1)
-	case target == p.aplTarget:
+	if target == p.aplTarget {
 		p.metrics.aplFailures.Add(1)
 	}
 }
 
-// Helper methods to identify target types
-func (p *edgeProxy) isOryxTarget(target *upstreamTarget) bool {
-	for _, t := range p.oryxTargets {
-		if t == target {
-			return true
-		}
-	}
-	return false
-}
 
-func (p *edgeProxy) isSVTarget(target *upstreamTarget) bool {
-	for _, t := range p.svTargets {
-		if t == target {
-			return true
-		}
-	}
-	return false
-}
-
-func (p *edgeProxy) isSUTarget(target *upstreamTarget) bool {
-	for _, t := range p.suTargets {
-		if t == target {
-			return true
-		}
-	}
-	return false
-}
-
-func (p *edgeProxy) isACFTarget(target *upstreamTarget) bool {
-	for _, t := range p.acfTargets {
-		if t == target {
-			return true
-		}
-	}
-	return false
-}
 
 // getSnapshot returns a point-in-time snapshot of all metrics
 func (m *metrics) getSnapshot() MetricsSnapshot {
@@ -1282,46 +827,14 @@ func (m *metrics) getSnapshot() MetricsSnapshot {
 		originFailureRate = float64(originFailures) / float64(originRequests) * 100
 	}
 
+	// APL failure rate
+	aplFailureRate := calculateFailureRate(m.aplRequests.Load(), m.aplFailures.Load())
+
 	originStats := map[string]OriginMetrics{
-		"oryx": {
-			Requests:    m.oryxRequests.Load(),
-			Failures:    m.oryxFailures.Load(),
-			FailureRate: calculateFailureRate(m.oryxRequests.Load(), m.oryxFailures.Load()),
-		},
-		"perya": {
-			Requests:    m.peryaRequests.Load(),
-			Failures:    m.peryaFailures.Load(),
-			FailureRate: calculateFailureRate(m.peryaRequests.Load(), m.peryaFailures.Load()),
-		},
-		"sv": {
-			Requests:    m.svRequests.Load(),
-			Failures:    m.svFailures.Load(),
-			FailureRate: calculateFailureRate(m.svRequests.Load(), m.svFailures.Load()),
-		},
-		"su": {
-			Requests:    m.suRequests.Load(),
-			Failures:    m.suFailures.Load(),
-			FailureRate: calculateFailureRate(m.suRequests.Load(), m.suFailures.Load()),
-		},
-		"acf": {
-			Requests:    m.acfRequests.Load(),
-			Failures:    m.acfFailures.Load(),
-			FailureRate: calculateFailureRate(m.acfRequests.Load(), m.acfFailures.Load()),
-		},
-		"wcc": {
-			Requests:    m.wccRequests.Load(),
-			Failures:    m.wccFailures.Load(),
-			FailureRate: calculateFailureRate(m.wccRequests.Load(), m.wccFailures.Load()),
-		},
-		"uk": {
-			Requests:    m.ukRequests.Load(),
-			Failures:    m.ukFailures.Load(),
-			FailureRate: calculateFailureRate(m.ukRequests.Load(), m.ukFailures.Load()),
-		},
 		"apl": {
 			Requests:    m.aplRequests.Load(),
 			Failures:    m.aplFailures.Load(),
-			FailureRate: calculateFailureRate(m.aplRequests.Load(), m.aplFailures.Load()),
+			FailureRate: aplFailureRate,
 		},
 	}
 
@@ -2039,52 +1552,12 @@ func (p *edgeProxy) forwardHeaders(target *upstreamTarget) map[string]string {
 
 func (p *edgeProxy) selectUpstream(path string) (*upstreamTarget, string, error) {
 	switch {
-	case strings.HasPrefix(path, "/__prefetch/perya"):
-		if p.peryaTarget == nil {
-			return nil, "", errors.New("PERYA origin not configured")
-		}
-		return p.peryaTarget, trimPrefix(path, "/__prefetch"), nil
-	case strings.HasPrefix(path, "/perya/"):
-		if p.peryaTarget == nil {
-			return nil, "", errors.New("PERYA origin not configured")
-		}
-		return p.peryaTarget, trimPrefix(path, "/perya"), nil
-	case strings.HasPrefix(path, "/__prefetch/ps"):
-		if target, trimmed, ok := matchNamed(path, "/__prefetch", p.oryxPrefixes, p.oryxNamed); ok {
-			return target, trimmed, nil
-		}
-		return nil, "", errors.New("PS origin not configured")
-	case strings.HasPrefix(path, "/ps"):
-		if target, trimmed, ok := matchNamed(path, "", p.oryxPrefixes, p.oryxNamed); ok {
-			return target, trimmed, nil
-		}
-		return nil, "", errors.New("PS origin not configured")
-	case strings.HasPrefix(path, "/__prefetch/sv"):
-		if target, trimmed, ok := p.matchSV(path, "/__prefetch"); ok {
-			return target, trimmed, nil
-		}
-		return nil, "", errors.New("SV origin not configured")
-	case strings.HasPrefix(path, "/sv"):
-		if target, trimmed, ok := p.matchSV(path, ""); ok {
-			return target, trimmed, nil
-		}
-		return nil, "", errors.New("SV origin not configured")
-	case strings.HasPrefix(path, "/__prefetch/su"):
-		if target, trimmed, ok := matchNamed(path, "/__prefetch", p.suPrefixes, p.suTargets); ok {
-			return target, trimmed, nil
-		}
-		return nil, "", errors.New("SU origin not configured")
 	case strings.HasPrefix(path, "/__prefetch/apl"):
 		if p.aplTarget == nil {
 			return nil, "", errors.New("APL origin not configured")
 		}
 		translated := trimPrefix(path, "/__prefetch/apl")
 		return p.aplTarget, translated, nil
-	case strings.HasPrefix(path, "/su"):
-		if target, trimmed, ok := matchNamed(path, "", p.suPrefixes, p.suTargets); ok {
-			return target, trimmed, nil
-		}
-		return nil, "", errors.New("SU origin not configured")
 	case strings.HasPrefix(path, "/apl"):
 		if p.aplTarget == nil {
 			return nil, "", errors.New("APL origin not configured")
@@ -2093,63 +1566,14 @@ func (p *edgeProxy) selectUpstream(path string) (*upstreamTarget, string, error)
 		// Keep timestamp in the path for cache key differentiation
 		// We'll strip it when making the actual origin request
 		return p.aplTarget, translated, nil
-	case strings.HasPrefix(path, "/__prefetch/acf"):
-		if target, trimmed, ok := matchNamed(path, "/__prefetch", p.acfPrefixes, p.acfTargets); ok {
-			return target, trimmed, nil
-		}
-		return nil, "", errors.New("ACF origin not configured")
-	case strings.HasPrefix(path, "/acf"):
-		if target, trimmed, ok := matchNamed(path, "", p.acfPrefixes, p.acfTargets); ok {
-			return target, trimmed, nil
-		}
-		return nil, "", errors.New("ACF origin not configured")
-	case strings.HasPrefix(path, "/__prefetch/wcc"):
-		if p.wccTarget == nil {
-			return nil, "", errors.New("WCC origin not configured")
-		}
-		return p.wccTarget, trimPrefix(path, "/__prefetch/wcc"), nil
-	case strings.HasPrefix(path, "/wcc"):
-		if p.wccTarget == nil {
-			return nil, "", errors.New("WCC origin not configured")
-		}
-		return p.wccTarget, trimPrefix(path, "/wcc"), nil
-	case strings.HasPrefix(path, "/__prefetch/uk"):
-		if p.ukTarget == nil {
-			return nil, "", errors.New("UK origin not configured")
-		}
-		return p.ukTarget, trimPrefix(path, "/__prefetch/uk"), nil
-	case strings.HasPrefix(path, "/uk/"):
-		if p.ukTarget == nil {
-			return nil, "", errors.New("UK origin not configured")
-		}
-		return p.ukTarget, trimPrefix(path, "/uk"), nil
-	case strings.HasPrefix(path, "/__prefetch/"):
-		return p.pickOryx(), trimPrefix(path, "/__prefetch"), nil
 	case path == "":
 		return nil, "", errors.New("empty request path")
 	default:
-		target := p.pickOryx()
-		if target == nil {
-			return nil, "", errors.New("ORYX origin not configured")
-		}
-		return target, path, nil
+		return nil, "", errors.New("only APL origin is supported")
 	}
 }
 
-func (p *edgeProxy) matchSV(path, base string) (*upstreamTarget, string, bool) {
-	return matchNamed(path, base, p.svPrefixes, p.svTargets)
-}
 
-func (p *edgeProxy) pickOryx() *upstreamTarget {
-	if len(p.oryxTargets) == 0 {
-		return nil
-	}
-	if len(p.oryxTargets) == 1 {
-		return p.oryxTargets[0]
-	}
-	index := p.oryxCounter.Add(1)
-	return p.oryxTargets[int(index)%len(p.oryxTargets)]
-}
 
 func (p *edgeProxy) schedulePrefetch(target *upstreamTarget, playlistPath string, body []byte) int {
 	if target == nil || target.base == nil {
@@ -2758,157 +2182,7 @@ func matchNamed(path, base string, prefixes []string, targets map[string]*upstre
 	return nil, "", false
 }
 
-func sortNamedPrefixes(prefixes []string) {
-	if len(prefixes) <= 1 {
-		return
-	}
-	sort.Slice(prefixes, func(i, j int) bool {
-		if len(prefixes[i]) == len(prefixes[j]) {
-			return prefixes[i] < prefixes[j]
-		}
-		return len(prefixes[i]) > len(prefixes[j])
-	})
-}
 
-func collectSVOrigins(defaultOrigin, defaultHost, defaultReferer string) map[string]originConfig {
-	entries := make(map[string]originConfig)
-	addEntry := func(name, origin, host, referer string) {
-		origin = strings.TrimSpace(origin)
-		if origin == "" {
-			return
-		}
-		key := strings.ToLower(strings.TrimSpace(name))
-		if key == "" {
-			return
-		}
-		entries[key] = originConfig{
-			Origin:  origin,
-			Host:    strings.TrimSpace(host),
-			Referer: strings.TrimSpace(referer),
-		}
-	}
-	if strings.TrimSpace(defaultOrigin) != "" {
-		addEntry("sv", defaultOrigin, defaultHost, defaultReferer)
-	}
-	for _, kv := range os.Environ() {
-		parts := strings.SplitN(kv, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := parts[0]
-		if !strings.HasPrefix(key, "SV_ORIGIN") || key == "SV_ORIGIN" {
-			continue
-		}
-		origin := strings.TrimSpace(parts[1])
-		if origin == "" {
-			continue
-		}
-		suffix := strings.TrimPrefix(key, "SV_ORIGIN")
-		host := strings.TrimSpace(os.Getenv("SV_HOST_HEADER" + suffix))
-		referer := strings.TrimSpace(os.Getenv("SV_REFERER" + suffix))
-		if referer == "" {
-			referer = defaultReferer
-		}
-		name := "sv" + strings.ToLower(strings.TrimSpace(suffix))
-		addEntry(name, origin, host, referer)
-	}
-	if len(entries) == 0 {
-		return nil
-	}
-	return entries
-}
-
-func collectSUOrigins(defaultReferer string) map[string]originConfig {
-	var entries map[string]originConfig
-	for _, kv := range os.Environ() {
-		parts := strings.SplitN(kv, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := parts[0]
-		if !strings.HasPrefix(key, "SU_ORIGIN") {
-			continue
-		}
-		origin := strings.TrimSpace(parts[1])
-		if origin == "" {
-			continue
-		}
-		suffix := strings.TrimPrefix(key, "SU_ORIGIN")
-		nameSuffix := strings.ToLower(strings.TrimSpace(suffix))
-		name := "su"
-		if nameSuffix != "" {
-			name += nameSuffix
-		}
-		host := strings.TrimSpace(os.Getenv("SU_HOST_HEADER" + suffix))
-		referer := strings.TrimSpace(os.Getenv("SU_REFERER" + suffix))
-		if referer == "" {
-			referer = defaultReferer
-		}
-		if entries == nil {
-			entries = make(map[string]originConfig)
-		}
-		entries[name] = originConfig{
-			Origin:  origin,
-			Host:    host,
-			Referer: referer,
-		}
-	}
-	return entries
-}
-
-func collectACFOrigins() map[string]originConfig {
-	return collectACFOriginsWithDefault("")
-}
-
-func collectACFOriginsWithDefault(defaultReferer string) map[string]originConfig {
-	var entries map[string]originConfig
-	for _, kv := range os.Environ() {
-		parts := strings.SplitN(kv, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := parts[0]
-		if !strings.HasPrefix(key, "ACF_ORIGIN") {
-			continue
-		}
-		origin := strings.TrimSpace(parts[1])
-		if origin == "" {
-			continue
-		}
-		suffix := strings.TrimPrefix(key, "ACF_ORIGIN")
-		nameSuffix := strings.ToLower(strings.TrimSpace(suffix))
-		name := "acf"
-		if nameSuffix != "" {
-			name += nameSuffix
-		}
-		host := strings.TrimSpace(os.Getenv("ACF_HOST_HEADER" + suffix))
-		referer := strings.TrimSpace(os.Getenv("ACF_REFERER" + suffix))
-		if referer == "" {
-			referer = defaultReferer
-		}
-		if entries == nil {
-			entries = make(map[string]originConfig)
-		}
-		entries[name] = originConfig{
-			Origin:  origin,
-			Host:    host,
-			Referer: referer,
-		}
-	}
-	return entries
-}
-
-func listOriginNames(origins map[string]originConfig) []string {
-	if len(origins) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(origins))
-	for name := range origins {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
-}
 
 func maxInt(a, b int) int {
 	if a > b {
@@ -3010,26 +2284,39 @@ func stripTimestampFromSegment(filename string) string {
 }
 
 // addTimestampToSegment adds a stable hash-based suffix to segment filenames
-// The hash is based on the segment name itself, ensuring the same segment
-// always gets the same "timestamp" across playlist refreshes.
-// This prevents iOS Safari from breaking on playlist updates.
+// The hash is based on the segment name + date + 30-minute session ID.
+// This ensures:
+// - Same segment gets same hash during playlist refreshes (iOS Safari compatibility)
+// - Different stream sessions (even same day) get different hashes (no stale cache)
+// - Session changes every 30 minutes to differentiate stream restarts
 // Example: "apexgaming0007.ts" -> "apexgaming0007-3456789012.ts"
 func addTimestampToSegment(filename string) string {
+	// Get current date and 30-minute session ID
+	now := time.Now()
+	dateStr := now.Format("20060102") // e.g., "20260325"
+	
+	// Create session ID that changes every 30 minutes
+	// This makes each stream session unique while staying stable during playback
+	hour := now.Hour()
+	sessionID := fmt.Sprintf("%02d%d", hour, now.Minute()/30) // e.g., "140" = 14:00-14:29, "141" = 14:30-14:59
+	
 	// Find the extension
 	extIdx := strings.LastIndex(filename, ".")
 	if extIdx < 0 {
-		// No extension, use simple hash of filename
+		// No extension, use simple hash of filename + date + session
 		hash := uint64(0)
-		for _, c := range filename {
+		combined := filename + dateStr + sessionID
+		for _, c := range combined {
 			hash = hash*31 + uint64(c)
 		}
 		return fmt.Sprintf("%s-%d", filename, hash%10000000000)
 	}
 	
-	// Create a stable hash from the base filename (without extension)
+	// Create a stable hash from the base filename + date + session
 	base := filename[:extIdx]
+	combined := base + dateStr + sessionID
 	hash := uint64(0)
-	for _, c := range base {
+	for _, c := range combined {
 		hash = hash*31 + uint64(c)
 	}
 	
